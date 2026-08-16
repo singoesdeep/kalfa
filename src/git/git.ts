@@ -178,6 +178,25 @@ export function pendingFiles(cwd: string): string[] {
     .filter((path) => path.length > 0);
 }
 
+/**
+ * The uncommitted diff — exactly what the reviewer is handed.
+ *
+ * Kept as an artifact so a blocking finding can be read against the code it
+ * was made about, months later, after the work has been stashed or amended.
+ * Untracked files show up because everything upstream of this has already run
+ * `git add --all` (see treeHash), which is what makes `git diff HEAD` complete.
+ */
+export function pendingDiff(cwd: string, maxChars = 2_000_000): string {
+  const diff = git(['diff', 'HEAD'], cwd);
+  return diff.length > maxChars
+    ? `${diff.slice(0, maxChars)}\n[... ${diff.length - maxChars} characters truncated ...]`
+    : diff;
+}
+
+export function pendingDiffStat(cwd: string): string {
+  return git(['diff', 'HEAD', '--stat'], cwd);
+}
+
 export function diffStat(cwd: string, sinceSha: string): string {
   return git(['diff', '--stat', `${sinceSha}..HEAD`], cwd);
 }

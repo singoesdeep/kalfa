@@ -52,7 +52,12 @@ export class StateStore {
   }
 
   setRunMeta(
-    meta: Partial<Pick<RunRecord, 'branch' | 'baseCommit' | 'finishedAt' | 'costIncomplete'>>,
+    meta: Partial<
+      Pick<
+        RunRecord,
+        'branch' | 'baseCommit' | 'finishedAt' | 'costIncomplete' | 'runDir' | 'stoppedEarly'
+      >
+    >,
   ): void {
     Object.assign(this.record, meta);
     this.flush();

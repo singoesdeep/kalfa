@@ -1,6 +1,8 @@
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureStateDir } from '../state/dir.js';
+import { Redactor } from '../state/redact.js';
+import type { Phase } from '../types.js';
 
 /**
  * The morning report.
@@ -19,6 +21,10 @@ export interface JournalEvent {
   runId: string;
   type: string;
   taskId?: string;
+  /** Present on everything inside a task attempt. */
+  attempt?: number;
+  /** Which stage of the attempt produced this event. */
+  phase?: Phase;
   [key: string]: unknown;
 }
 
@@ -29,8 +35,14 @@ export class Journal {
     private readonly cwd: string,
     private readonly runId: string,
     stateDir = '.kalfa',
+    private readonly redactor = new Redactor(),
   ) {
     this.journalPath = join(ensureStateDir(cwd, stateDir), 'journal.jsonl');
+  }
+
+  /** Where the stream lives, so a run can tell an operator what to follow. */
+  get path(): string {
+    return this.journalPath;
   }
 
   event(type: string, fields: Record<string, unknown> = {}): void {
@@ -40,7 +52,12 @@ export class Journal {
       type,
       ...fields,
     };
-    appendFileSync(this.journalPath, `${JSON.stringify(event)}\n`, 'utf8');
+    // Redacting the serialized line rather than each field is both simpler and
+    // more complete: it cannot miss a secret nested three objects deep in a
+    // gate result. JSON escaping does not change the shape of the credentials
+    // being matched, so the patterns still hit.
+    const line = this.redactor.redact(JSON.stringify(event)).text;
+    appendFileSync(this.journalPath, `${line}\n`, 'utf8');
   }
 
   /** Read back this run's events, for `kalfa report`. */
@@ -76,6 +93,6 @@ export class Journal {
       ...(detail ? ['', '```', detail.slice(0, 4000), '```'] : []),
       '',
     ].join('\n');
-    appendFileSync(path, entry, 'utf8');
+    appendFileSync(path, this.redactor.redact(entry).text, 'utf8');
   }
 }

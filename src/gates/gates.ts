@@ -8,11 +8,36 @@ import type { GateResult } from '../types.js';
  * stdin will hang the run until its timeout.
  */
 
+/**
+ * How a caller watches a gate run.
+ *
+ * Gate output used to exist in exactly one form: a trimmed tail, merged across
+ * both streams, buried in the state file. That is enough to feed a retry and
+ * not enough to diagnose one. The runner now hands in sinks that keep the full
+ * streams separately on disk, and an `onOutput` for `--verbose`, so a gate that
+ * takes six minutes is visibly doing something.
+ */
+export interface GateObserver {
+  /** Called with the exact command, immediately before it is spawned. */
+  onStart?: (gate: GateConfig) => void;
+  /** Live output, stream-tagged. Called per chunk, not per line. */
+  onOutput?: (gate: GateConfig, stream: 'stdout' | 'stderr', chunk: string) => void;
+  /** Where to persist the untruncated streams for this gate. */
+  sinks?: (gate: GateConfig) => GateSinks | undefined;
+  onFinish?: (result: GateResult) => void;
+}
+
+export interface GateSinks {
+  stdout: { path: string; write: (chunk: string) => void; close: () => unknown };
+  stderr: { path: string; write: (chunk: string) => void; close: () => unknown };
+}
+
 function runShell(
   command: string,
   cwd: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  onChunk?: (stream: 'stdout' | 'stderr', chunk: string) => void,
 ): Promise<{ code: number | null; output: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, {
@@ -49,8 +74,18 @@ function runShell(
       fn();
     };
 
-    child.stdout.on('data', (c: Buffer) => (output += c.toString('utf8')));
-    child.stderr.on('data', (c: Buffer) => (output += c.toString('utf8')));
+    const take = (stream: 'stdout' | 'stderr') => (c: Buffer) => {
+      const text = c.toString('utf8');
+      // The merged copy is what the agent reads back on failure; interleaving
+      // the two streams in arrival order is how a human would have read them
+      // in a terminal, and how a compiler's error lines line up with its
+      // progress lines.
+      output += text;
+      onChunk?.(stream, text);
+    };
+
+    child.stdout.on('data', take('stdout'));
+    child.stderr.on('data', take('stderr'));
     child.on('error', (err) => finish(() => reject(err)));
     child.on('close', (code) => finish(() => resolve({ code, output, timedOut })));
   });
@@ -70,28 +105,50 @@ export async function runGate(
   gate: GateConfig,
   cwd: string,
   signal?: AbortSignal,
+  observer?: GateObserver,
 ): Promise<GateResult> {
   const started = Date.now();
+  const sinks = observer?.sinks?.(gate);
+  observer?.onStart?.(gate);
+
+  const paths = sinks ? { stdoutPath: sinks.stdout.path, stderrPath: sinks.stderr.path } : {};
+
+  const finish = (result: GateResult): GateResult => {
+    sinks?.stdout.close();
+    sinks?.stderr.close();
+    observer?.onFinish?.(result);
+    return result;
+  };
+
   try {
-    const res = await runShell(gate.run, cwd, gate.timeout_ms, signal);
+    const res = await runShell(gate.run, cwd, gate.timeout_ms, signal, (stream, chunk) => {
+      (stream === 'stdout' ? sinks?.stdout : sinks?.stderr)?.write(chunk);
+      observer?.onOutput?.(gate, stream, chunk);
+    });
     const output = res.timedOut
       ? `Gate "${gate.name}" timed out after ${gate.timeout_ms}ms.\n${res.output}`
       : res.output;
-    return {
+    const trimmed = trimOutput(output, gate.max_output_chars);
+    return finish({
       name: gate.name,
       ok: res.code === 0 && !res.timedOut,
       exitCode: res.code ?? -1,
-      output: trimOutput(output, gate.max_output_chars),
+      output: trimmed,
       durationMs: Date.now() - started,
-    };
+      command: gate.run,
+      ...paths,
+      ...(trimmed.length < output.trim().length ? { truncated: true } : {}),
+    });
   } catch (err) {
-    return {
+    return finish({
       name: gate.name,
       ok: false,
       exitCode: -1,
       output: `Gate "${gate.name}" could not be started: ${(err as Error).message}`,
       durationMs: Date.now() - started,
-    };
+      command: gate.run,
+      ...paths,
+    });
   }
 }
 
@@ -104,6 +161,7 @@ export async function runGates(
   gates: GateConfig[],
   cwd: string,
   signal?: AbortSignal,
+  observer?: GateObserver,
 ): Promise<GateResult[]> {
   const results: GateResult[] = [];
   let halted = false;
@@ -117,10 +175,11 @@ export async function runGates(
         output: '',
         durationMs: 0,
         skipped: true,
+        command: gate.run,
       });
       continue;
     }
-    const result = await runGate(gate, cwd, signal);
+    const result = await runGate(gate, cwd, signal, observer);
     results.push(result);
     if (!result.ok && gate.required) halted = true;
   }

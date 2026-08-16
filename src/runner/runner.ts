@@ -2,7 +2,13 @@ import type { KalfaConfig } from '../config/schema.js';
 import type { Plan, Task } from '../plan/schema.js';
 import { topoOrder } from '../plan/schema.js';
 import { AgentInvoker } from '../agents/provider.js';
-import { blockingFailures, gatesForTask, runGates } from '../gates/gates.js';
+import {
+  blockingFailures,
+  gatesForTask,
+  runGates,
+  type GateObserver,
+  type GateSinks,
+} from '../gates/gates.js';
 import { protectedAmong, protectedPathsCallout } from '../gates/protected.js';
 import { formatFindings, reviewTask } from '../review/review.js';
 import {
@@ -13,10 +19,21 @@ import {
 } from '../prompts/contract.js';
 import { Journal } from '../journal/journal.js';
 import { StateStore } from '../state/store.js';
+import type { ArtifactStore } from '../state/artifacts.js';
 import { writeBoard } from '../board/board.js';
 import { adrInstructions, nextAdrNumber, readAdrs, refreshAdrIndex } from '../adr/adr.js';
 import * as git from '../git/git.js';
-import type { AttemptRecord, Feedback, GateResult, TaskStatus } from '../types.js';
+import type {
+  AgentRun,
+  AttemptRecord,
+  Feedback,
+  GateResult,
+  Phase,
+  ReviewFinding,
+  ReviewResult,
+  TaskStatus,
+  ToolEvent,
+} from '../types.js';
 
 export interface RunnerOptions {
   cwd: string;
@@ -27,24 +44,111 @@ export interface RunnerOptions {
   store: StateStore;
   journal: Journal;
   signal?: AbortSignal;
+  /**
+   * Where per-attempt evidence is written. Omitted — as tests do — the runner
+   * still runs and simply cites nothing.
+   */
+  artifacts?: ArtifactStore;
   /** Progress reporting. The CLI renders these; tests ignore them. */
   onEvent?: (event: RunnerEvent) => void;
   /** Injection seam for tests. Defaults to the real subprocess invoker. */
   makeInvoker?: (role: 'builder' | 'reviewer') => AgentInvoker;
 }
 
+/**
+ * Everything a live observer is entitled to know.
+ *
+ * These are emitted as they happen, not summarised at the end, and each one
+ * that names a process names the command too. The same stream reaches the
+ * terminal, `.kalfa/journal.jsonl`, and through it `kalfa status --watch`.
+ */
 export type RunnerEvent =
-  | { type: 'run_start'; total: number; branch?: string }
+  | { type: 'run_start'; total: number; branch?: string; runDir?: string }
   | { type: 'task_start'; task: Task; index: number; total: number }
-  | { type: 'attempt_start'; taskId: string; attempt: number; max: number }
-  | { type: 'agent_done'; taskId: string; ok: boolean; costUsd: number; durationMs: number }
-  | { type: 'gates_done'; taskId: string; results: GateResult[] }
-  | { type: 'review_done'; taskId: string; findings: number; blocking: number; error?: string }
-  | { type: 'second_opinion'; taskId: string }
+  | { type: 'attempt_start'; taskId: string; attempt: number; max: number; artifactsDir?: string }
+  /** The active stage of the current attempt. */
+  | { type: 'phase'; taskId: string; attempt: number; phase: Phase; detail?: string }
+  /** A child process was spawned: which, as what, with what pid. */
+  | {
+      type: 'command_start';
+      taskId: string;
+      attempt: number;
+      phase: Phase;
+      name: string;
+      command: string;
+      pid?: number;
+      stdoutPath?: string;
+      stderrPath?: string;
+    }
+  | {
+      type: 'command_end';
+      taskId: string;
+      attempt: number;
+      phase: Phase;
+      name: string;
+      exitCode?: number;
+      ok: boolean;
+      durationMs: number;
+      stdoutPath?: string;
+      stderrPath?: string;
+    }
+  /** One tool call the builder made, when its CLI reports them. */
+  | { type: 'tool_event'; taskId: string; attempt: number; tool: ToolEvent }
+  /** Live subprocess output, only emitted under --verbose. */
+  | {
+      type: 'output';
+      taskId: string;
+      attempt: number;
+      phase: Phase;
+      name: string;
+      stream: 'stdout' | 'stderr';
+      chunk: string;
+    }
+  | {
+      type: 'agent_done';
+      taskId: string;
+      attempt: number;
+      ok: boolean;
+      costUsd: number;
+      durationMs: number;
+      toolCalls: number;
+      toolEventsSupported: boolean;
+      stdoutPath?: string;
+      error?: string;
+    }
+  | { type: 'gates_done'; taskId: string; attempt: number; results: GateResult[] }
+  | {
+      type: 'review_done';
+      taskId: string;
+      attempt: number;
+      findings: number;
+      blocking: number;
+      error?: string;
+      findingsPath?: string;
+      rawPath?: string;
+      details?: ReviewFinding[];
+    }
+  | { type: 'second_opinion'; taskId: string; attempt: number }
   | { type: 'protected_touched'; taskId: string; files: string[] }
   | { type: 'worker_committed'; taskId: string }
-  | { type: 'retrying'; taskId: string; reason: string }
-  | { type: 'task_done'; taskId: string; status: TaskStatus; commit?: string; reason?: string }
+  /** Why the next attempt is happening, and where the evidence for it is. */
+  | {
+      type: 'retrying';
+      taskId: string;
+      attempt: number;
+      reason: string;
+      causedBy?: string;
+      artifactsDir?: string;
+      evidence?: string[];
+    }
+  | {
+      type: 'task_done';
+      taskId: string;
+      status: TaskStatus;
+      commit?: string;
+      reason?: string;
+      artifactsDir?: string;
+    }
   | { type: 'run_end'; counts: Record<TaskStatus, number>; costUsd: number };
 
 export interface RunSummary {
@@ -77,6 +181,13 @@ export class Runner {
   private lastReport = '';
   private lastGateResults: GateResult[] = [];
   private lastStashRef: string | undefined;
+  /** The final attempt's artifact directory, cited by the block report. */
+  private lastArtifactsDir: string | undefined;
+  private lastEvidence: string[] = [];
+  /** The attempt before the current one, so a retry can cite what caused it. */
+  private previousEvidence: string[] = [];
+  /** Sinks handed to the running gate, so its start event can name their paths. */
+  private readonly gateSinks = new Map<string, GateSinks>();
 
   constructor(private readonly opts: RunnerOptions) {
     const make =
@@ -95,6 +206,352 @@ export class Runner {
     this.opts.onEvent?.(event);
   }
 
+  /**
+   * Announce the active stage.
+   *
+   * Emitted and journalled together on purpose: a phase that reached the
+   * terminal but not the event log would be invisible to `status --watch`, and
+   * one that reached only the log would leave a live terminal silent. They are
+   * the same fact and there is no reason for them to diverge.
+   */
+  private phase(taskId: string, attempt: number, phase: Phase, detail?: string): void {
+    this.emit({ type: 'phase', taskId, attempt, phase, ...(detail ? { detail } : {}) });
+    this.opts.journal.event('phase', { taskId, attempt, phase, detail });
+  }
+
+  private commandStart(event: Extract<RunnerEvent, { type: 'command_start' }>): void {
+    this.emit(event);
+    const { type: _type, ...fields } = event;
+    this.opts.journal.event('command_started', fields);
+  }
+
+  private commandEnd(event: Extract<RunnerEvent, { type: 'command_end' }>): void {
+    this.emit(event);
+    const { type: _type, ...fields } = event;
+    this.opts.journal.event('command_finished', fields);
+  }
+
+  /** Repo-relative artifact directory for an attempt, or undefined if disabled. */
+  private artifactsDir(taskId: string, attempt: number): string | undefined {
+    const store = this.opts.artifacts;
+    return store ? store.rel(store.attemptDir(taskId, attempt)) : undefined;
+  }
+
+  /**
+   * Watch the gates: the command before it runs, both streams as they arrive,
+   * the exit code and where the full output landed.
+   *
+   * "gate project-check FAIL" with the output summarised into the terminal and
+   * the rest in a JSON blob was the shape of the problem. A named command and
+   * two file paths make the same line actionable.
+   */
+  private gateObserver(taskId: string, attempt: number): GateObserver {
+    const artifacts = this.opts.artifacts;
+    const started = new Map<string, number>();
+
+    return {
+      onStart: (gate) => {
+        started.set(gate.name, Date.now());
+        const sinks = this.gateSinks.get(gate.name);
+        this.commandStart({
+          type: 'command_start',
+          taskId,
+          attempt,
+          phase: 'gate',
+          name: gate.name,
+          command: gate.run,
+          ...(sinks ? { stdoutPath: sinks.stdout.path, stderrPath: sinks.stderr.path } : {}),
+        });
+      },
+      onOutput: (gate, stream, chunk) => {
+        this.emit({
+          type: 'output',
+          taskId,
+          attempt,
+          phase: 'gate',
+          name: gate.name,
+          stream,
+          chunk,
+        });
+      },
+      sinks: (gate) => {
+        if (!artifacts) return undefined;
+        const sinks = {
+          stdout: artifacts.sink(taskId, attempt, `gates/${gate.name}.stdout.log`),
+          stderr: artifacts.sink(taskId, attempt, `gates/${gate.name}.stderr.log`),
+        };
+        this.gateSinks.set(gate.name, sinks);
+        return sinks;
+      },
+      onFinish: (result) => {
+        this.commandEnd({
+          type: 'command_end',
+          taskId,
+          attempt,
+          phase: 'gate',
+          name: result.name,
+          exitCode: result.exitCode,
+          ok: result.ok,
+          durationMs: Date.now() - (started.get(result.name) ?? Date.now()),
+          ...(result.stdoutPath ? { stdoutPath: result.stdoutPath } : {}),
+          ...(result.stderrPath ? { stderrPath: result.stderrPath } : {}),
+        });
+      },
+    };
+  }
+
+  /**
+   * What this attempt concluded and what happens next, beside the evidence.
+   *
+   * The missing link in a retry chain: the log said `retry 2/3` and a
+   * shortened cause, and nothing on disk connected that decision to the gate
+   * output or the review that produced it. `decision.json` lists both, in the
+   * attempt directory the retry line cites.
+   */
+  private recordDecision(
+    taskId: string,
+    attempt: number,
+    decision: {
+      outcome: AttemptRecord['outcome'];
+      next: 'retry' | 'block' | 'commit';
+      reason?: string;
+      blocking?: ReviewFinding[];
+      gates?: unknown[];
+      evidence: string[];
+    },
+  ): void {
+    this.opts.artifacts?.writeJson(taskId, attempt, 'decision.json', {
+      taskId,
+      attempt,
+      at: new Date().toISOString(),
+      ...decision,
+      // Deduplicated: a gate that both streams to disk and appears in the
+      // evidence list would otherwise be cited twice.
+      evidence: [...new Set(decision.evidence)],
+    });
+  }
+
+  /**
+   * Run the reviewer, keeping its complete response on disk.
+   *
+   * The run log can show one line per finding and BLOCKED.md a paragraph;
+   * neither is the reviewer's actual answer. Both artifacts here have earned
+   * their place from real runs: `review.findings.json` because a shortened
+   * blocker is unfalsifiable, and `review.raw.txt` because the one case where
+   * the summary is worthless — "reviewer returned unparseable output" — is
+   * exactly the case where you need to see what it really said.
+   */
+  private async invokeReview(
+    task: Task,
+    attempt: number,
+    gateCommands: string[],
+    callout: string | undefined,
+    evidence: string[],
+    second = false,
+  ): Promise<ReviewResult> {
+    const reviewer = this.reviewer!;
+    const prefix = second ? 'review.second' : 'review';
+    const started = Date.now();
+
+    const result = await reviewTask({
+      reviewer,
+      task,
+      cwd: this.opts.cwd,
+      gateCommands,
+      policy: this.opts.config.policy,
+      ...(this.opts.signal ? { signal: this.opts.signal } : {}),
+      ...(callout ? { protectedCallout: callout } : {}),
+      upcoming: this.remainingAfter(task),
+      ...(this.opts.artifacts
+        ? {
+            capture: (kind, content): string => {
+              const name =
+                kind === 'raw'
+                  ? `${prefix}.raw.txt`
+                  : kind === 'findings'
+                    ? `${prefix}.findings.json`
+                    : `${prefix}.request.json`;
+              const ref = this.opts.artifacts!.write(task.id, attempt, name, content);
+              evidence.push(ref.path);
+              return ref.path;
+            },
+          }
+        : {}),
+      observe: {
+        onSpawn: ({ commandLine, pid }) => {
+          this.commandStart({
+            type: 'command_start',
+            taskId: task.id,
+            attempt,
+            phase: second ? 'second_opinion' : 'review',
+            name: reviewer.label,
+            command: commandLine,
+            ...(pid !== undefined ? { pid } : {}),
+          });
+        },
+      },
+    });
+
+    this.commandEnd({
+      type: 'command_end',
+      taskId: task.id,
+      attempt,
+      phase: second ? 'second_opinion' : 'review',
+      name: reviewer.label,
+      ok: !result.error,
+      durationMs: Date.now() - started,
+    });
+    return result;
+  }
+
+  /**
+   * The diff as the reviewer will see it, kept beside the finding it produces.
+   *
+   * A blocking finding is a claim about a diff, and the diff is the first
+   * thing that stops existing: blocked work gets stashed, passed work gets
+   * committed and amended. Adjudicating "the reviewer said the test file was
+   * modified" in the morning means having the diff it was actually looking at.
+   */
+  private captureDiff(taskId: string, attempt: number, evidence: string[]): void {
+    if (!this.opts.artifacts) return;
+    try {
+      const diff = this.opts.artifacts.write(taskId, attempt, 'diff.patch', git.pendingDiff(this.opts.cwd));
+      const stat = this.opts.artifacts.write(
+        taskId,
+        attempt,
+        'diff.stat.txt',
+        `${git.pendingDiffStat(this.opts.cwd)}\n`,
+      );
+      evidence.push(diff.path, stat.path);
+    } catch (err) {
+      // Evidence is worth a lot and not worth the run. A repository state git
+      // cannot diff is a problem the gates and the reviewer will find anyway.
+      this.opts.journal.event('artifact_failed', {
+        taskId,
+        attempt,
+        artifact: 'diff',
+        error: (err as Error).message,
+      });
+    }
+  }
+
+  /**
+   * Run the builder with everything it does written down as it happens.
+   *
+   * The builder is the longest and least visible part of a task — a single
+   * subprocess that can run for half an hour. Three things come out of it here
+   * that did not before: the command line and pid the moment it exists, its
+   * streams persisted while they arrive rather than after it exits, and its
+   * tool calls as individual events. The middle one is what survives a crash.
+   */
+  private async invokeBuilder(
+    taskId: string,
+    attempt: number,
+    prompt: string,
+    evidence: string[],
+  ): Promise<
+    AgentRun & { toolCalls: number; toolEventsPath?: string; stdoutPath?: string; stderrPath?: string }
+  > {
+    const artifacts = this.opts.artifacts;
+    const stdout = artifacts?.sink(taskId, attempt, 'builder.stdout.log');
+    const stderr = artifacts?.sink(taskId, attempt, 'builder.stderr.log');
+    const tools = artifacts?.sink(taskId, attempt, 'builder.tools.jsonl');
+    const started = Date.now();
+    let toolCalls = 0;
+
+    try {
+      const run = await this.builder.invoke(prompt, {
+        cwd: this.opts.cwd,
+        systemPrompt: this.systemPrompt('builder'),
+        ...(this.opts.signal ? { signal: this.opts.signal } : {}),
+        onSpawn: ({ commandLine, pid }) => {
+          this.commandStart({
+            type: 'command_start',
+            taskId,
+            attempt,
+            phase: 'builder',
+            name: this.builder.label,
+            command: commandLine,
+            ...(pid !== undefined ? { pid } : {}),
+            ...(stdout ? { stdoutPath: stdout.path } : {}),
+            ...(stderr ? { stderrPath: stderr.path } : {}),
+          });
+        },
+        onOutput: (stream, chunk) => {
+          (stream === 'stdout' ? stdout : stderr)?.write(chunk);
+          // The builder's stdout is a JSONL transcript, not something a human
+          // reads; --verbose surfaces its tool calls instead, and only stderr
+          // is worth echoing raw.
+          if (stream === 'stderr') {
+            this.emit({
+              type: 'output',
+              taskId,
+              attempt,
+              phase: 'builder',
+              name: this.builder.label,
+              stream,
+              chunk,
+            });
+          }
+        },
+        onToolEvent: (tool) => {
+          toolCalls += 1;
+          tools?.write(`${JSON.stringify({ ...tool, taskId, attempt })}\n`);
+          this.emit({ type: 'tool_event', taskId, attempt, tool });
+        },
+      });
+
+      this.commandEnd({
+        type: 'command_end',
+        taskId,
+        attempt,
+        phase: 'builder',
+        name: this.builder.label,
+        ok: run.ok,
+        durationMs: Date.now() - started,
+        ...(stdout ? { stdoutPath: stdout.path } : {}),
+        ...(stderr ? { stderrPath: stderr.path } : {}),
+      });
+
+      for (const ref of [stdout?.close(), stderr?.close(), toolCalls > 0 ? tools?.close() : undefined]) {
+        if (ref) evidence.push(ref.path);
+      }
+
+      return {
+        ...run,
+        toolCalls,
+        ...(tools && toolCalls > 0 ? { toolEventsPath: tools.path } : {}),
+        ...(stdout ? { stdoutPath: stdout.path } : {}),
+        ...(stderr ? { stderrPath: stderr.path } : {}),
+      };
+    } catch (err) {
+      // A builder that could not be spawned at all still leaves a trace, and
+      // the run continues to treat it as a failed attempt rather than dying.
+      stdout?.close();
+      stderr?.close();
+      const message = (err as Error).message;
+      this.commandEnd({
+        type: 'command_end',
+        taskId,
+        attempt,
+        phase: 'builder',
+        name: this.builder.label,
+        ok: false,
+        durationMs: Date.now() - started,
+      });
+      return {
+        text: '',
+        ok: false,
+        costUsd: 0,
+        costKnown: true,
+        durationMs: Date.now() - started,
+        toolEventsSupported: false,
+        error: `the worker could not be started: ${message}`,
+        toolCalls,
+      };
+    }
+  }
+
   private systemPrompt(role: 'builder' | 'reviewer'): string {
     const agent =
       role === 'builder' ? this.opts.config.agents.builder : this.opts.config.agents.reviewer;
@@ -108,7 +565,8 @@ export class Runner {
 
     const baseCommit = git.headSha(cwd);
     const branch = this.setupBranch();
-    store.setRunMeta({ baseCommit, ...(branch ? { branch } : {}) });
+    const runDir = this.opts.artifacts ? this.opts.artifacts.rel(this.opts.artifacts.dir) : undefined;
+    store.setRunMeta({ baseCommit, ...(branch ? { branch } : {}), ...(runDir ? { runDir } : {}) });
     // Scaffold the decision record directory and its index before any task
     // runs, so the first worker has somewhere to write and something to read.
     refreshAdrIndex(cwd);
@@ -116,8 +574,20 @@ export class Runner {
     // Land Kalfa's own bookkeeping in its own commit, so the first task starts
     // from a clean tree and no worker's diff is polluted by it.
     this.commitBookkeeping(`kalfa: begin run ${this.opts.runId}`);
-    journal.event('run_start', { total: tasks.length, branch, baseCommit, goal: plan.goal });
-    this.emit({ type: 'run_start', total: tasks.length, ...(branch ? { branch } : {}) });
+    journal.event('run_start', {
+      total: tasks.length,
+      branch,
+      baseCommit,
+      goal: plan.goal,
+      runDir,
+      order: tasks.map((t) => t.id),
+    });
+    this.emit({
+      type: 'run_start',
+      total: tasks.length,
+      ...(branch ? { branch } : {}),
+      ...(runDir ? { runDir } : {}),
+    });
 
     let consecutiveBlocks = 0;
     let stoppedEarly: string | undefined;
@@ -168,7 +638,10 @@ export class Runner {
 
     const counts = store.counts();
     const costUsd = store.totalCostUsd();
-    store.setRunMeta({ finishedAt: new Date().toISOString() });
+    store.setRunMeta({
+      finishedAt: new Date().toISOString(),
+      ...(stoppedEarly ? { stoppedEarly } : {}),
+    });
     this.refreshBoard();
     // Without this the final board is left uncommitted, and the NEXT run
     // refuses to start on a dirty tree.
@@ -278,12 +751,20 @@ export class Runner {
     this.lastFeedback = [];
     this.lastReport = '';
     this.lastGateResults = [];
+    this.lastArtifactsDir = undefined;
+    this.lastEvidence = [];
+    this.previousEvidence = [];
 
     for (let attempt = 1; attempt <= config.policy.max_attempts; attempt += 1) {
       if (this.opts.signal?.aborted) break;
 
       const attemptStart = Date.now();
       const headBefore = git.headSha(cwd);
+      const artifactsDir = this.artifactsDir(task.id, attempt);
+      const evidence: string[] = [];
+      this.previousEvidence = this.lastEvidence;
+      this.lastArtifactsDir = artifactsDir;
+      this.lastEvidence = evidence;
       if (attempt > 1 && feedback.length > 0) {
         prior.push({ attempt: attempt - 1, feedback: [...feedback] });
       }
@@ -292,21 +773,28 @@ export class Runner {
         taskId: task.id,
         attempt,
         max: config.policy.max_attempts,
+        ...(artifactsDir ? { artifactsDir } : {}),
       });
       // Journalled on entry, not on completion. An attempt is only added to
       // the task record once it finishes, so a run killed mid-builder used to
       // leave no trace of it at all — the board showed a task with one fewer
       // attempt than it had really made, and the interrupted work looked
       // like it came from nowhere.
-      journal.event('attempt_start', { taskId: task.id, attempt, headBefore });
+      journal.event('attempt_start', { taskId: task.id, attempt, headBefore, artifactsDir });
 
       if (attempt > 1 && feedback.length > 0) {
         // Without this a retry can appear in the log with no explanation at
         // all — a builder line, then a bare `retry 2/3`. The reason existed
         // internally and never reached the operator.
-        this.emit({
-          type: 'retrying',
+        //
+        // The cause now cites the previous attempt's directory as well: a
+        // one-line summary of a failure is a pointer, and a pointer to nowhere
+        // is what made the old line unfalsifiable.
+        const causedBy = this.artifactsDir(task.id, attempt - 1);
+        const retryEvent = {
+          type: 'retrying' as const,
           taskId: task.id,
+          attempt,
           reason: feedback
             .map((f) => {
               const firstLine = f.detail.split('\n').find((l) => l.trim()) ?? '';
@@ -314,9 +802,20 @@ export class Runner {
             })
             .join('; ')
             .slice(0, 200),
+          ...(causedBy ? { causedBy } : {}),
+          ...(this.previousEvidence.length > 0 ? { evidence: [...this.previousEvidence] } : {}),
+        };
+        this.emit(retryEvent);
+        journal.event('retry_decision', {
+          taskId: task.id,
+          attempt,
+          causedBy,
+          evidence: this.previousEvidence,
+          feedback: feedback.map((f) => ({ kind: f.kind, source: f.source, detail: f.detail })),
         });
       }
 
+      this.phase(task.id, attempt, 'preparing');
       const prompt =
         attempt === 1
           ? taskPrompt(
@@ -333,28 +832,50 @@ export class Runner {
               gateCommands,
               adrInstructions(nextAdrNumber(cwd), task.id),
             );
+      if (this.opts.config.observability.capture_prompts) {
+        const ref = this.opts.artifacts?.write(task.id, attempt, 'builder.prompt.md', prompt);
+        if (ref) evidence.push(ref.path);
+      }
 
-      const run = await this.builder.invoke(prompt, {
-        cwd,
-        systemPrompt: this.systemPrompt('builder'),
-        ...(this.opts.signal ? { signal: this.opts.signal } : {}),
-      });
+      this.phase(task.id, attempt, 'builder', this.builder.label);
+      const run = await this.invokeBuilder(task.id, attempt, prompt, evidence);
 
       this.lastReport = run.text;
       if (!run.costKnown) this.noteCostIncomplete();
+      const reportRef = this.opts.artifacts?.write(
+        task.id,
+        attempt,
+        'builder.report.md',
+        run.text || '(the worker produced no final message)\n',
+      );
+      if (reportRef) evidence.push(reportRef.path);
+
       this.emit({
         type: 'agent_done',
-        taskId: task.id,
-        ok: run.ok,
-        costUsd: run.costUsd,
-        durationMs: run.durationMs,
-      });
-      journal.event('agent_done', {
         taskId: task.id,
         attempt,
         ok: run.ok,
         costUsd: run.costUsd,
         durationMs: run.durationMs,
+        toolCalls: run.toolCalls,
+        toolEventsSupported: run.toolEventsSupported,
+        ...(run.stdoutPath ? { stdoutPath: run.stdoutPath } : {}),
+        ...(run.error ? { error: run.error } : {}),
+      });
+      journal.event('agent_done', {
+        taskId: task.id,
+        attempt,
+        phase: 'builder' satisfies Phase,
+        ok: run.ok,
+        costUsd: run.costUsd,
+        durationMs: run.durationMs,
+        toolCalls: run.toolCalls,
+        toolEventsSupported: run.toolEventsSupported,
+        stdoutPath: run.stdoutPath,
+        stderrPath: run.stderrPath,
+        toolEventsPath: run.toolEventsPath,
+        reportPath: reportRef?.path,
+        error: run.error,
         summary: run.text.slice(0, 2000),
       });
 
@@ -368,6 +889,7 @@ export class Runner {
           reviewFindings: 0,
           blockingFindings: 0,
           outcome,
+          ...(artifactsDir ? { artifactsDir } : {}),
           ...extra,
         });
 
@@ -376,6 +898,12 @@ export class Runner {
         feedback = this.lastFeedback = [
           { kind: 'agent', source: this.builder.label, detail: run.error ?? 'worker failed' },
         ];
+        this.recordDecision(task.id, attempt, {
+          outcome: 'agent_failed',
+          next: attempt < config.policy.max_attempts ? 'retry' : 'block',
+          reason: run.error ?? 'worker failed',
+          evidence,
+        });
         continue;
       }
 
@@ -411,6 +939,12 @@ export class Runner {
               'created or modified. Implement the task by editing files on disk.',
           },
         ];
+        this.recordDecision(task.id, attempt, {
+          outcome: 'agent_failed',
+          next: attempt < config.policy.max_attempts ? 'retry' : 'block',
+          reason: 'the working tree was unchanged relative to the last commit',
+          evidence,
+        });
         continue;
       }
 
@@ -418,13 +952,36 @@ export class Runner {
       // gates run, so a stale index never reaches the next task.
       refreshAdrIndex(cwd);
 
-      const gateResults = gates.length > 0 ? await runGates(gates, cwd, this.opts.signal) : [];
+      // Captured before the gates, because a gate is allowed to write files
+      // (a formatter, a snapshot update) and the diff the reviewer will be
+      // shown is the one that matters for the finding it makes.
+      this.phase(task.id, attempt, 'collecting_diff');
+      this.captureDiff(task.id, attempt, evidence);
+
+      const gateResults =
+        gates.length > 0
+          ? await runGates(gates, cwd, this.opts.signal, this.gateObserver(task.id, attempt))
+          : [];
       this.lastGateResults = gateResults;
-      this.emit({ type: 'gates_done', taskId: task.id, results: gateResults });
+      for (const gate of gateResults) {
+        if (gate.stdoutPath) evidence.push(gate.stdoutPath);
+        if (gate.stderrPath) evidence.push(gate.stderrPath);
+      }
+      this.emit({ type: 'gates_done', taskId: task.id, attempt, results: gateResults });
       journal.event('gates_done', {
         taskId: task.id,
         attempt,
-        results: gateResults.map((g) => ({ name: g.name, ok: g.ok, exitCode: g.exitCode })),
+        phase: 'gate' satisfies Phase,
+        results: gateResults.map((g) => ({
+          name: g.name,
+          ok: g.ok,
+          exitCode: g.exitCode,
+          command: g.command,
+          durationMs: g.durationMs,
+          skipped: g.skipped,
+          stdoutPath: g.stdoutPath,
+          stderrPath: g.stderrPath,
+        })),
       });
 
       const failed = blockingFailures(gateResults, gates);
@@ -435,6 +992,19 @@ export class Runner {
           source: g.name,
           detail: g.output || `exited ${g.exitCode} with no output`,
         }));
+        this.recordDecision(task.id, attempt, {
+          outcome: 'gate_failed',
+          next: attempt < config.policy.max_attempts ? 'retry' : 'block',
+          reason: failed.map((g) => `${g.name} exited ${g.exitCode}`).join(', '),
+          gates: failed.map((g) => ({
+            name: g.name,
+            command: g.command,
+            exitCode: g.exitCode,
+            stdoutPath: g.stdoutPath,
+            stderrPath: g.stderrPath,
+          })),
+          evidence,
+        });
         continue;
       }
 
@@ -459,29 +1029,29 @@ export class Runner {
         touchedProtected.length > 0 ? protectedPathsCallout(touchedProtected) : undefined;
 
       if (wantsReview && this.reviewer) {
-        const review = await reviewTask(
-          this.reviewer,
-          task,
-          cwd,
-          gateCommands,
-          config.policy,
-          this.opts.signal,
-          callout,
-          this.remainingAfter(task),
-        );
+        this.phase(task.id, attempt, 'review', this.reviewer.label);
+        const review = await this.invokeReview(task, attempt, gateCommands, callout, evidence);
         this.emit({
           type: 'review_done',
           taskId: task.id,
+          attempt,
           findings: review.findings.length,
           blocking: review.blocking.length,
+          details: review.findings,
           ...(review.error ? { error: review.error } : {}),
+          ...(review.findingsPath ? { findingsPath: review.findingsPath } : {}),
+          ...(review.rawPath ? { rawPath: review.rawPath } : {}),
         });
         if (!review.costKnown) this.noteCostIncomplete();
         journal.event('review_done', {
           taskId: task.id,
           attempt,
+          phase: 'review' satisfies Phase,
           findings: review.findings,
+          blocking: review.blocking.length,
           error: review.error,
+          findingsPath: review.findingsPath,
+          rawPath: review.rawPath,
         });
 
         if (review.error) {
@@ -497,6 +1067,13 @@ export class Runner {
             reviewFindings: 0,
             blockingFindings: 0,
             outcome: 'review_failed',
+            ...(artifactsDir ? { artifactsDir } : {}),
+          });
+          this.recordDecision(task.id, attempt, {
+            outcome: 'review_failed',
+            next: 'block',
+            reason: `reviewer could not run: ${review.error}`,
+            evidence,
           });
           return this.blockTask(task, `reviewer could not run: ${review.error}`);
         }
@@ -515,25 +1092,20 @@ export class Runner {
         // one extra review call.
         const lastChance = attempt === config.policy.max_attempts;
         if (blocking.length > 0 && lastChance && config.policy.review_second_opinion) {
-          this.emit({ type: 'second_opinion', taskId: task.id });
-          const second = await reviewTask(
-            this.reviewer,
-            task,
-            cwd,
-            gateCommands,
-            config.policy,
-            this.opts.signal,
-            callout,
-            this.remainingAfter(task),
-          );
+          this.emit({ type: 'second_opinion', taskId: task.id, attempt });
+          this.phase(task.id, attempt, 'second_opinion', this.reviewer.label);
+          const second = await this.invokeReview(task, attempt, gateCommands, callout, evidence, true);
           if (!second.costKnown) this.noteCostIncomplete();
           reviewCostUsd += second.costUsd;
           journal.event('second_opinion', {
             taskId: task.id,
             attempt,
+            phase: 'second_opinion' satisfies Phase,
             firstFindings: review.blocking,
             secondFindings: second.blocking,
             error: second.error,
+            findingsPath: second.findingsPath,
+            rawPath: second.rawPath,
             withdrawn: !second.error && second.blocking.length === 0,
           });
           // Only a clean second read overturns the block. An unreadable one
@@ -543,8 +1115,11 @@ export class Runner {
             this.emit({
               type: 'review_done',
               taskId: task.id,
+              attempt,
               findings: second.findings.length,
               blocking: 0,
+              details: second.findings,
+              ...(second.findingsPath ? { findingsPath: second.findingsPath } : {}),
             });
           }
         }
@@ -559,6 +1134,7 @@ export class Runner {
             reviewFindings: review.findings.length,
             blockingFindings: blocking.length,
             outcome: 'review_failed',
+            ...(artifactsDir ? { artifactsDir } : {}),
           });
           feedback = this.lastFeedback = [
             {
@@ -567,6 +1143,13 @@ export class Runner {
               detail: formatFindings(blocking),
             },
           ];
+          this.recordDecision(task.id, attempt, {
+            outcome: 'review_failed',
+            next: attempt < config.policy.max_attempts ? 'retry' : 'block',
+            reason: formatFindings(blocking),
+            blocking,
+            evidence,
+          });
           continue;
         }
 
@@ -579,6 +1162,7 @@ export class Runner {
         record('passed', { gates: gateResults });
       }
 
+      this.recordDecision(task.id, attempt, { outcome: 'passed', next: 'commit', evidence });
       return this.completeTask(task, attempt, adrsBefore);
     }
 
@@ -588,14 +1172,22 @@ export class Runner {
   private completeTask(task: Task, attempt: number, adrsBefore = 0): TaskStatus {
     const { cwd, config, store, journal } = this.opts;
     const adrsWritten = Math.max(0, readAdrs(cwd).length - adrsBefore);
+    const artifactsDir = this.artifactsDir(task.id, attempt);
 
     if (!config.policy.commit_per_task) {
       store.setStatus(task.id, 'done', { adrsWritten });
       this.refreshBoard();
-      journal.event('task_done', { taskId: task.id, attempt });
-      this.emit({ type: 'task_done', taskId: task.id, status: 'done' });
+      journal.event('task_done', { taskId: task.id, attempt, artifactsDir });
+      this.emit({
+        type: 'task_done',
+        taskId: task.id,
+        status: 'done',
+        ...(artifactsDir ? { artifactsDir } : {}),
+      });
       return 'done';
     }
+
+    this.phase(task.id, attempt, 'commit');
 
     const message = [
       `${task.id}: ${task.title}`,
@@ -611,8 +1203,14 @@ export class Runner {
     const commit = git.commitAll(cwd, message);
     store.setStatus(task.id, 'done', { adrsWritten, ...(commit ? { commit } : {}) });
     this.refreshBoard();
-    journal.event('task_done', { taskId: task.id, attempt, commit });
-    this.emit({ type: 'task_done', taskId: task.id, status: 'done', ...(commit ? { commit } : {}) });
+    journal.event('task_done', { taskId: task.id, attempt, commit, artifactsDir });
+    this.emit({
+      type: 'task_done',
+      taskId: task.id,
+      status: 'done',
+      ...(commit ? { commit } : {}),
+      ...(artifactsDir ? { artifactsDir } : {}),
+    });
     return 'done';
   }
 
@@ -645,6 +1243,18 @@ export class Runner {
       parts.push(`${item.kind.toUpperCase()} (${item.source}):\n${item.detail.slice(0, 1500)}`);
     }
 
+    // Where the untruncated version of everything above lives. Each section of
+    // this report is a summary of a file, and the operator adjudicating a
+    // disputed blocker at 9am needs the file, not the summary.
+    if (this.lastArtifactsDir) {
+      parts.push(
+        [
+          `FULL EVIDENCE: ${this.lastArtifactsDir}/`,
+          ...[...new Set(this.lastEvidence)].map((path) => `  ${path}`),
+        ].join('\n'),
+      );
+    }
+
     if (this.lastReport) {
       parts.push(
         `WORKER'S FINAL REPORT:\n${this.lastReport.slice(0, 1500)}\n\n` +
@@ -665,10 +1275,13 @@ export class Runner {
   private blockTask(task: Task, reason: string): TaskStatus {
     const { cwd, config, store, journal } = this.opts;
 
+    const attempt = store.task(task.id).attempts.length;
     let stashRef: string | undefined;
     if (config.policy.stash_failed_work && !git.isClean(cwd)) {
+      this.phase(task.id, attempt, 'stash');
       stashRef = git.stashAll(cwd, `kalfa ${this.opts.runId} blocked ${task.id}`);
     }
+    this.phase(task.id, attempt, 'blocked', reason);
     this.lastStashRef = stashRef;
 
     store.setStatus(task.id, 'blocked', {
@@ -678,7 +1291,14 @@ export class Runner {
     // After the stash, never before: `git stash push -u` would sweep the
     // board away with the abandoned work, losing the record of the failure.
     this.refreshBoard();
-    journal.event('task_blocked', { taskId: task.id, reason, stashRef });
+    journal.event('task_blocked', {
+      taskId: task.id,
+      attempt,
+      reason,
+      stashRef,
+      artifactsDir: this.lastArtifactsDir,
+      evidence: [...new Set(this.lastEvidence)],
+    });
     const detail = [
       this.blockedDetail(),
       stashRef
@@ -695,7 +1315,13 @@ export class Runner {
     // BLOCKED.md is written after the stash on purpose: the report must survive
     // even though the work it describes was parked.
     this.commitBookkeeping(`kalfa: blocked ${task.id}`);
-    this.emit({ type: 'task_done', taskId: task.id, status: 'blocked', reason });
+    this.emit({
+      type: 'task_done',
+      taskId: task.id,
+      status: 'blocked',
+      reason,
+      ...(this.lastArtifactsDir ? { artifactsDir: this.lastArtifactsDir } : {}),
+    });
     return 'blocked';
   }
 }

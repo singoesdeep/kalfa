@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig } from '../config/schema.js';
-import type { AgentRun } from '../types.js';
+import type { AgentRun, ToolEvent } from '../types.js';
 
 /**
  * Both agents are driven as subprocesses rather than through an SDK.
@@ -25,7 +25,18 @@ export interface InvokeOptions {
   /** Forces JSON output conforming to this schema. Codex only. */
   outputSchema?: unknown;
   signal?: AbortSignal;
-  onLine?: (line: string) => void;
+  /** The command line and pid, the moment the child exists. */
+  onSpawn?: (info: { commandLine: string; pid?: number }) => void;
+  /** Raw output as it arrives, for persisting and for `--verbose`. */
+  onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
+  /**
+   * One tool call the agent made, when the vendor CLI reports them.
+   *
+   * This is the difference between "the builder has been running for nine
+   * minutes" and "the builder is on its fourth `npm test`". Only the claude
+   * provider can supply these today; see `toolEventsSupported`.
+   */
+  onToolEvent?: (event: ToolEvent) => void;
 }
 
 export interface SpawnResult {
@@ -33,6 +44,11 @@ export interface SpawnResult {
   stderr: string;
   code: number | null;
   timedOut: boolean;
+  /** Exactly what was spawned, so an operator can reproduce it by hand. */
+  commandLine: string;
+  pid?: number;
+  /** ISO timestamp of the last byte the child produced, or undefined if none. */
+  lastOutputAt?: string;
 }
 
 /**
@@ -52,7 +68,15 @@ export function runProcess(
   command: string,
   args: string[],
   input: string,
-  opts: { cwd: string; timeoutMs: number; signal?: AbortSignal; onLine?: (line: string) => void },
+  opts: {
+    cwd: string;
+    timeoutMs: number;
+    signal?: AbortSignal;
+    /** Called per complete stdout line, for vendors that stream JSONL. */
+    onLine?: (line: string) => void;
+    onSpawn?: (info: { commandLine: string; pid?: number }) => void;
+    onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
+  },
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     // Windows needs a shell, because `claude` and `codex` are .cmd shims that
@@ -64,8 +88,9 @@ export function runProcess(
     // puts the quoting under our control and silences the warning honestly,
     // rather than by suppressing it.
     const isWindows = process.platform === 'win32';
+    const commandLine = [command, ...args.map(quoteForCmd)].join(' ');
     const child = isWindows
-      ? spawn([command, ...args.map(quoteForCmd)].join(' '), {
+      ? spawn(commandLine, {
           cwd: opts.cwd,
           shell: true,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -76,10 +101,13 @@ export function runProcess(
           stdio: ['pipe', 'pipe', 'pipe'],
         });
 
+    opts.onSpawn?.({ commandLine, ...(child.pid !== undefined ? { pid: child.pid } : {}) });
+
     let stdout = '';
     let stderr = '';
     let timedOut = false;
     let settled = false;
+    let lastOutputAt: string | undefined;
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -103,6 +131,8 @@ export function runProcess(
     child.stdout.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
       stdout += text;
+      lastOutputAt = new Date().toISOString();
+      opts.onOutput?.('stdout', text);
       if (!opts.onLine) return;
       pending += text;
       const lines = pending.split('\n');
@@ -110,11 +140,29 @@ export function runProcess(
       for (const line of lines) if (line.trim()) opts.onLine(line);
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
+      const text = chunk.toString('utf8');
+      stderr += text;
+      lastOutputAt = new Date().toISOString();
+      opts.onOutput?.('stderr', text);
     });
 
     child.on('error', (err) => finish(() => reject(err)));
-    child.on('close', (code) => finish(() => resolve({ stdout, stderr, code, timedOut })));
+    child.on('close', (code) =>
+      finish(() => {
+        // A vendor that never terminates its last line would otherwise have it
+        // dropped, taking the result object with it.
+        if (opts.onLine && pending.trim()) opts.onLine(pending);
+        resolve({
+          stdout,
+          stderr,
+          code,
+          timedOut,
+          commandLine,
+          ...(child.pid !== undefined ? { pid: child.pid } : {}),
+          ...(lastOutputAt ? { lastOutputAt } : {}),
+        });
+      }),
+    );
 
     child.stdin.on('error', () => {
       // A process that exits before reading stdin (bad flags, auth failure)
@@ -125,7 +173,22 @@ export function runProcess(
 }
 
 function argsForClaude(agent: AgentConfig, systemPrompt?: string): string[] {
-  const args = ['-p', '--output-format', 'json', '--permission-mode', agent.permission_mode];
+  // stream-json, not json.
+  //
+  // Both formats end with the same result object, so nothing downstream had to
+  // change — but the streaming form emits one line per turn on the way there,
+  // and those lines carry the tool calls. Without them a builder is a black box
+  // for the length of a task: the operator cannot tell editing from testing
+  // from stalled. `--verbose` is not optional here; claude requires it with
+  // stream-json under `-p`.
+  const args = [
+    '-p',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--permission-mode',
+    agent.permission_mode,
+  ];
   if (agent.model) args.push('--model', agent.model);
   if (agent.max_turns !== undefined) args.push('--max-turns', String(agent.max_turns));
   if (systemPrompt) args.push('--append-system-prompt', systemPrompt);
@@ -187,6 +250,73 @@ export function parseClaudeResult(stdout: string): ClaudeResult {
   }
 }
 
+/**
+ * Pull the tool calls out of one `--output-format stream-json` line.
+ *
+ * Deliberately shallow: the name, and one line describing what it was pointed
+ * at. Kalfa does not record the tool's own output here — that is the vendor's
+ * transcript to keep, it can be enormous, and it is the most likely place for
+ * repository content to leak into an artifact.
+ *
+ * Nothing here records model reasoning. Thinking blocks are skipped.
+ */
+export function toolEventsFromLine(line: string): ToolEvent[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return [];
+  }
+  const message = (parsed as { type?: string; message?: { content?: unknown } })?.message;
+  if ((parsed as { type?: string }).type !== 'assistant' || !Array.isArray(message?.content)) {
+    return [];
+  }
+
+  const at = new Date().toISOString();
+  return (message.content as Array<Record<string, unknown>>)
+    .filter((block) => block?.['type'] === 'tool_use' && typeof block['name'] === 'string')
+    .map((block) => {
+      const detail = describeToolInput(block['input']);
+      return { at, name: block['name'] as string, ...(detail ? { detail } : {}) };
+    });
+}
+
+/** One line describing what a tool call was aimed at, never its result. */
+function describeToolInput(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const fields = input as Record<string, unknown>;
+  for (const key of ['command', 'file_path', 'path', 'pattern', 'url', 'description']) {
+    const value = fields[key];
+    if (typeof value === 'string' && value.trim()) {
+      const oneLine = value.replace(/\s+/g, ' ').trim();
+      return oneLine.length > 200 ? `${oneLine.slice(0, 200)}…` : oneLine;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The result object out of a stream-json transcript.
+ *
+ * The last `type: "result"` line is the same object the non-streaming format
+ * returns whole, so the existing parser applies unchanged. When there is no
+ * such line — an older CLI, a crash mid-stream — the raw output is parsed as
+ * before rather than losing the run entirely.
+ */
+export function parseClaudeStream(stdout: string): ClaudeResult {
+  const lines = stdout.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]?.trim();
+    if (!line?.startsWith('{')) continue;
+    try {
+      if ((JSON.parse(line) as { type?: string }).type === 'result') return parseClaudeResult(line);
+    } catch {
+      // Not the result line; keep walking backwards.
+    }
+  }
+  return parseClaudeResult(stdout);
+}
+
 /** Turn an abort subtype into something the retry prompt can act on. */
 export function describeAbort(subtype: string): string {
   switch (subtype) {
@@ -230,9 +360,18 @@ export class AgentInvoker {
       cwd: opts.cwd,
       timeoutMs: this.agent.timeout_ms,
       ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.onSpawn ? { onSpawn: opts.onSpawn } : {}),
+      ...(opts.onOutput ? { onOutput: opts.onOutput } : {}),
+      ...(opts.onToolEvent
+        ? {
+            onLine: (line: string): void => {
+              for (const event of toolEventsFromLine(line)) opts.onToolEvent?.(event);
+            },
+          }
+        : {}),
     });
 
-    const parsed = parseClaudeResult(res.stdout);
+    const parsed = parseClaudeStream(res.stdout);
     const durationMs = Date.now() - started;
     const ok = res.code === 0 && !res.timedOut && !parsed.aborted;
 
@@ -248,6 +387,10 @@ export class AgentInvoker {
       costUsd: parsed.costUsd,
       costKnown: true,
       durationMs,
+      toolEventsSupported: true,
+      commandLine: res.commandLine,
+      ...(res.pid !== undefined ? { pid: res.pid } : {}),
+      ...(res.lastOutputAt ? { lastOutputAt: res.lastOutputAt } : {}),
       ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
       ...(ok ? {} : { error }),
     };
@@ -277,6 +420,8 @@ export class AgentInvoker {
         cwd: opts.cwd,
         timeoutMs: this.agent.timeout_ms,
         ...(opts.signal ? { signal: opts.signal } : {}),
+        ...(opts.onSpawn ? { onSpawn: opts.onSpawn } : {}),
+        ...(opts.onOutput ? { onOutput: opts.onOutput } : {}),
       });
 
       let text = '';
@@ -296,6 +441,14 @@ export class AgentInvoker {
         costUsd: 0,
         costKnown: false,
         durationMs: Date.now() - started,
+        // `codex exec` reports no per-turn tool activity on stdout. Said
+        // plainly rather than left as silence: an operator watching a reviewer
+        // print nothing for four minutes should know that is the CLI, not a
+        // hang, and the stdout artifact plus the pid are what they get instead.
+        toolEventsSupported: false,
+        commandLine: res.commandLine,
+        ...(res.pid !== undefined ? { pid: res.pid } : {}),
+        ...(res.lastOutputAt ? { lastOutputAt: res.lastOutputAt } : {}),
         ...(ok
           ? {}
           : {

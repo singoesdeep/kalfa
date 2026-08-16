@@ -2,6 +2,39 @@
 
 export type TaskStatus = 'pending' | 'running' | 'done' | 'blocked' | 'skipped';
 
+/**
+ * What the run is doing right now.
+ *
+ * A live run used to be legible only in retrospect: `builder ok`, `gate pass`,
+ * `review 2 blocking`, and between those lines minutes of silence in which the
+ * operator could not tell working from stalled. Naming the phase is what makes
+ * "which process is running, on what" answerable at any instant.
+ */
+export type Phase =
+  | 'preparing'
+  | 'builder'
+  | 'collecting_diff'
+  | 'gate'
+  | 'review'
+  | 'second_opinion'
+  | 'retry'
+  | 'commit'
+  | 'stash'
+  | 'blocked';
+
+export const PHASE_LABEL: Record<Phase, string> = {
+  preparing: 'preparing prompt',
+  builder: 'builder running',
+  collecting_diff: 'collecting diff',
+  gate: 'running gate',
+  review: 'reviewer running',
+  second_opinion: 'reviewer running (second opinion)',
+  retry: 'persisting retry',
+  commit: 'committing',
+  stash: 'stashing abandoned work',
+  blocked: 'writing block report',
+};
+
 /** Why an attempt failed, fed back verbatim into the next attempt's prompt. */
 export interface Feedback {
   kind: 'gate' | 'review' | 'agent';
@@ -29,6 +62,34 @@ export interface AgentRun {
   sessionId?: string;
   /** Non-zero exit or transport failure, as opposed to a task-level failure. */
   error?: string;
+  /** The command line Kalfa actually spawned, for the operator to reproduce. */
+  commandLine?: string;
+  /** OS process id, so a live run can be inspected with the usual tools. */
+  pid?: number;
+  /** Repo-relative artifact paths holding the untruncated transcript. */
+  stdoutPath?: string;
+  stderrPath?: string;
+  /** Tool/command activity, when the vendor CLI reports any. */
+  toolEventsPath?: string;
+  /**
+   * False when the provider gives no tool-level visibility at all.
+   *
+   * Recorded rather than glossed over: an operator watching a codex reviewer
+   * sit silent for four minutes deserves to know that the silence is the CLI's
+   * limitation and not a hang.
+   */
+  toolEventsSupported: boolean;
+  /** Wall-clock of the last byte the child produced — a liveness heartbeat. */
+  lastOutputAt?: string;
+}
+
+/** One tool call or shell command a builder made, as far as the CLI reports it. */
+export interface ToolEvent {
+  at: string;
+  /** 'Bash', 'Edit', 'Read', ... — the vendor's own tool name. */
+  name: string;
+  /** A one-line rendering of the arguments: the command, the file path. */
+  detail?: string;
 }
 
 export interface GateResult {
@@ -40,6 +101,13 @@ export interface GateResult {
   durationMs: number;
   /** True when the gate never ran because an earlier required gate failed. */
   skipped?: boolean;
+  /** The exact shell command, so the operator can run it themselves. */
+  command?: string;
+  /** Repo-relative artifact paths holding the full, untrimmed streams. */
+  stdoutPath?: string;
+  stderrPath?: string;
+  /** True when `output` above is a tail of something longer. */
+  truncated?: boolean;
 }
 
 export interface ReviewFinding {
@@ -62,6 +130,10 @@ export interface ReviewResult {
   durationMs: number;
   /** Set when the reviewer itself failed to run or returned unparseable output. */
   error?: string;
+  /** Repo-relative path to the reviewer's untruncated response. */
+  rawPath?: string;
+  /** Repo-relative path to the parsed findings, every severity included. */
+  findingsPath?: string;
 }
 
 export interface AttemptRecord {
@@ -73,6 +145,14 @@ export interface AttemptRecord {
   reviewFindings: number;
   blockingFindings: number;
   outcome: 'passed' | 'gate_failed' | 'review_failed' | 'agent_failed';
+  /**
+   * Where this attempt's complete evidence lives, repo-relative.
+   *
+   * Recorded on the attempt rather than derived by the reader, so a retry
+   * cause in the log, a line in BLOCKED.md and a state file entry all cite the
+   * same directory instead of three descriptions of it.
+   */
+  artifactsDir?: string;
 }
 
 export interface TaskRecord {
@@ -108,5 +188,9 @@ export interface RunRecord {
   planPath: string;
   branch?: string;
   baseCommit?: string;
+  /** Repo-relative run directory holding this run's artifacts. */
+  runDir?: string;
+  /** Set when the run stopped before finishing the plan, with the reason. */
+  stoppedEarly?: string;
   tasks: Record<string, TaskRecord>;
 }
