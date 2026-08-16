@@ -142,3 +142,29 @@ describe('specPrompt', () => {
     expect(specPrompt('g', [])).toMatch(/Do not write implementation steps/);
   });
 });
+
+/**
+ * The codex CLI does not report per-run cost, so a run with a codex reviewer
+ * spends more than it reports. Presenting that total as if it were the bill
+ * would be a lie, and `max_run_cost_usd` is enforced against it.
+ */
+describe('cost is never presented as complete when it is not', () => {
+  const incomplete: RunRecord = { ...run, costIncomplete: true };
+
+  it('marks the total as a floor', () => {
+    expect(renderBoard(plan, incomplete)).toContain('$0.7200+');
+  });
+
+  it('says why, rather than leaving a bare plus sign', () => {
+    const board = renderBoard(plan, incomplete);
+    expect(board).toMatch(/Costs are a FLOOR/);
+    expect(board).toMatch(/codex CLI does not report per-run/);
+  });
+
+  it('leaves a complete total unqualified', () => {
+    const board = renderBoard(plan, run);
+    expect(board).toContain('$0.7200');
+    expect(board).not.toContain('$0.7200+');
+    expect(board).not.toMatch(/FLOOR/);
+  });
+});

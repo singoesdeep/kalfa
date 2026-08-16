@@ -73,6 +73,8 @@ export function renderBoard(plan: Plan, run: RunRecord): string {
     counts[run.tasks[task.id]?.status ?? 'pending'] += 1;
   }
   const totalCost = Object.values(run.tasks).reduce((sum, t) => sum + t.costUsd, 0);
+  // Never present a floor as if it were the bill.
+  const costLabel = run.costIncomplete ? `${usd(totalCost)}+` : usd(totalCost);
 
   const summary = [
     `${counts.done}/${ordered.length} done`,
@@ -80,7 +82,7 @@ export function renderBoard(plan: Plan, run: RunRecord): string {
     counts.skipped > 0 ? `${counts.skipped} skipped` : '',
     counts.running > 0 ? `${counts.running} running` : '',
     counts.pending > 0 ? `${counts.pending} pending` : '',
-    usd(totalCost),
+    costLabel,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -97,6 +99,13 @@ export function renderBoard(plan: Plan, run: RunRecord): string {
     ``,
     summary,
     ``,
+    ...(run.costIncomplete
+      ? [
+          `> Costs are a FLOOR, not a total: the codex CLI does not report per-run`,
+          `> cost, so the reviewer's spend is missing from every figure here.`,
+          ``,
+        ]
+      : []),
     `| # | Task | Status | Attempts | Commit | Cost |`,
     `|---|---|---|---|---|---|`,
   ];

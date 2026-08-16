@@ -338,6 +338,10 @@ delete a stash. Nothing it does is unrecoverable through git.
 - **`.kalfa/` ignores itself** from within, so run state is never committed to
   your history and never swept up by a stash.
 - **`max_run_cost_usd`** stops the run before the next task when hit.
+- **One run at a time per repository.** A lock file records the pid; a second
+  run refuses to start rather than interleaving commits and clobbering state
+  with the first. A lock whose process is gone is treated as stale and taken
+  over, so a crash never blocks the next run.
 
 ## Configuration
 
@@ -358,9 +362,12 @@ them reported without forcing a retry.
 
 ## Known limitations
 
-- **Codex cost is reported as $0.** The `codex exec` CLI does not print
+- **Codex cost is not reported at all.** The `codex exec` CLI does not print
   per-run cost, and Kalfa will not invent a number from a local price table.
-  Reported run cost is the builder's cost only, and is therefore a floor.
+  Every total is therefore the builder's spend only. Kalfa marks such totals
+  with a trailing `+` and says so in `TASKS.md`, in `kalfa status` and at the
+  end of a run — including the warning that `max_run_cost_usd` is enforced
+  against that floor, so real spend can exceed the ceiling you set.
 - **Tasks run one at a time.** Independent tasks could run in parallel; they
   don't yet. Wall-clock is the sum of the plan.
 - **No quality measurement.** The gates prove the code compiles, passes tests
@@ -373,9 +380,11 @@ them reported without forcing a retry.
   no way for the builder to win an argument. When gates are green and only the
   review blocks, BLOCKED.md now records the finding, the worker'''s answer to
   it, and where the work is parked — so you can adjudicate rather than guess.
-- **Retry feedback is per-attempt, not cumulative.** Attempt 3 is told about
-  attempt 2's failure, not attempt 1's. It can read the working tree to see
-  what was tried, but nothing stops it oscillating between two wrong fixes.
+- **Nothing detects a genuine oscillation.** Every retry is now told what all
+  its predecessors failed on — one line each, under `Already tried and
+  failed` — so a worker can recognise a loop. Whether it acts on that is up to
+  the model; Kalfa does not detect repetition itself and will happily spend
+  all three attempts on it.
 - **The ADR index still grows**, just far more slowly than a single log would.
   On a very long plan it is still a rising per-task cost, and nothing prunes
   or scopes it to the task at hand.
@@ -396,7 +405,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 127 tests, no API calls
+npm test         # 150 tests, no API calls
 npm run typecheck
 npm run build
 ```

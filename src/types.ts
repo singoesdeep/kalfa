@@ -15,6 +15,15 @@ export interface AgentRun {
   text: string;
   ok: boolean;
   costUsd: number;
+  /**
+   * Whether costUsd is real or a placeholder.
+   *
+   * The codex CLI does not report per-run cost, and Kalfa will not invent one
+   * from a local price table. Its runs report 0 with costKnown false, so a
+   * total can be labelled as the floor it actually is rather than passed off
+   * as the whole bill.
+   */
+  costKnown: boolean;
   durationMs: number;
   /** Provider session id, when the provider reports one. */
   sessionId?: string;
@@ -48,6 +57,8 @@ export interface ReviewResult {
   /** Findings at or above the configured blocking severity. */
   blocking: ReviewFinding[];
   costUsd: number;
+  /** False when the provider does not report cost — see AgentRun.costKnown. */
+  costKnown: boolean;
   durationMs: number;
   /** Set when the reviewer itself failed to run or returned unparseable output. */
   error?: string;
@@ -79,6 +90,8 @@ export interface TaskRecord {
 
 export interface RunRecord {
   runId: string;
+  /** True when some agent could not report its cost, so totals are a floor. */
+  costIncomplete?: boolean;
   startedAt: string;
   finishedAt?: string;
   planPath: string;

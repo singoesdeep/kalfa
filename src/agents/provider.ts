@@ -220,6 +220,7 @@ export class AgentInvoker {
       text: parsed.text,
       ok,
       costUsd: parsed.costUsd,
+      costKnown: true,
       durationMs,
       ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
       ...(ok ? {} : { error }),
@@ -263,9 +264,11 @@ export class AgentInvoker {
       return {
         text,
         ok,
-        // Codex does not report per-run cost on stdout; leave it honest at 0
-        // rather than inventing a number from a local price table.
+        // Codex does not report per-run cost on stdout. Reporting 0 with
+        // costKnown false keeps the total honest as a floor; inventing a
+        // number from a local price table would be worse than admitting it.
         costUsd: 0,
+        costKnown: false,
         durationMs: Date.now() - started,
         ...(ok
           ? {}

@@ -19,7 +19,7 @@ function stubPlanner(replies: string[], ok = true): AgentInvoker {
     invoke: async (): Promise<AgentRun> => {
       const text = replies[Math.min(call, replies.length - 1)]!;
       call += 1;
-      return { text, ok, costUsd: 0.05, durationMs: 10 };
+      return { text, ok, costUsd: 0.05, costKnown: true, durationMs: 10 };
     },
   } as unknown as AgentInvoker;
 }
@@ -115,7 +115,7 @@ describe('generatePlan', () => {
       provider: 'claude',
       invoke: async (): Promise<AgentRun> => {
         calls += 1;
-        return { text: 'nope', ok: true, costUsd: 0, durationMs: 1 };
+        return { text: 'nope', ok: true, costUsd: 0, costKnown: true, durationMs: 1 };
       },
     } as unknown as AgentInvoker;
 

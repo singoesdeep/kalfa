@@ -103,6 +103,7 @@ export async function reviewTask(
       findings: [],
       blocking: [],
       costUsd: run.costUsd,
+      costKnown: run.costKnown,
       durationMs: run.durationMs,
       error: run.error ?? 'reviewer failed',
     };
@@ -116,6 +117,7 @@ export async function reviewTask(
       findings: [],
       blocking: [],
       costUsd: run.costUsd,
+      costKnown: run.costKnown,
       durationMs: run.durationMs,
       error: `reviewer returned unparseable output: ${run.text.slice(0, 500)}`,
     };
@@ -125,6 +127,7 @@ export async function reviewTask(
     findings,
     blocking: blockingFindings(findings, policy.blocking_severity),
     costUsd: run.costUsd,
+    costKnown: run.costKnown,
     durationMs: run.durationMs,
   };
 }

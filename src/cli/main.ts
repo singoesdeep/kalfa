@@ -13,6 +13,7 @@ import {
   type Answer,
 } from '../plan/generate.js';
 import { ensureStateDir } from '../state/dir.js';
+import { acquireLock, LockError } from '../state/lock.js';
 import { generateSpec, readSpec, writeSpec, PRD_PATH, SPEC_PATH } from '../spec/spec.js';
 import { renderBoardPlain } from '../board/board.js';
 import { ConfigError, loadConfig, loadPlan } from '../config/load.js';
@@ -185,8 +186,11 @@ program
       `${counts.done}/${plan.tasks.length} done` +
         (counts.blocked > 0 ? `, ${counts.blocked} blocked` : '') +
         (counts.skipped > 0 ? `, ${counts.skipped} skipped` : '') +
-        `  ·  ${usd(cost)}\n`,
+        `  ·  ${usd(cost)}${run.costIncomplete ? '+' : ''}\n`,
     );
+    if (run.costIncomplete) {
+      process.stdout.write(`cost is a floor — codex does not report its spend\n`);
+    }
     if (counts.blocked + counts.skipped + counts.pending > 0) {
       process.stdout.write(`\nresume with: kalfa run --run-id ${run.runId}\n`);
       process.stdout.write(`details in TASKS.md and BLOCKED.md\n`);
@@ -429,7 +433,14 @@ program
   .option('-p, --plan <path>', 'plan file', 'kalfa.plan.json')
   .option('--run-id <id>', 'resume an existing run instead of starting a new one')
   .option('--dry-run', 'print the execution order and exit')
-  .action(async (opts: { config?: string; plan: string; runId?: string; dryRun?: boolean }) => {
+  .option('--force', 'take the run lock even if another run appears to hold it')
+  .action(async (opts: {
+    config?: string;
+    plan: string;
+    runId?: string;
+    dryRun?: boolean;
+    force?: boolean;
+  }) => {
     const cwd = process.cwd();
     let config, plan, planPath;
     try {
@@ -450,6 +461,23 @@ program
     preflight(cwd);
 
     const runId = opts.runId ?? makeRunId();
+
+    // One run per working tree. Two would interleave commits and clobber each
+    // other's state, which is not a race to lose gracefully — it is data loss.
+    let releaseLock: () => void;
+    try {
+      releaseLock = acquireLock(cwd, {
+        runId,
+        command: 'kalfa run',
+        ...(opts.force ? { force: true } : {}),
+      });
+    } catch (err) {
+      if (err instanceof LockError) fail(err.message);
+      throw err;
+    }
+    const release = (): void => releaseLock();
+    process.once('exit', release);
+
     const store = new StateStore(cwd, runId, planPath);
     const journal = new Journal(cwd, runId);
 
@@ -476,13 +504,25 @@ program
       onEvent: (event) => render(event),
     });
 
-    const summary = await runner.run();
+    let summary;
+    try {
+      summary = await runner.run();
+    } finally {
+      release();
+    }
     const { counts } = summary;
 
     process.stdout.write(
       `\n${counts.done} done, ${counts.blocked} blocked, ${counts.skipped} skipped` +
-        `  ·  ${usd(summary.costUsd)}  ·  ${seconds(Date.now() - startedAt)}\n`,
+        `  ·  ${usd(summary.costUsd)}${store.run.costIncomplete ? '+' : ''}` +
+        `  ·  ${seconds(Date.now() - startedAt)}\n`,
     );
+    if (store.run.costIncomplete) {
+      process.stdout.write(
+        `cost shown is a FLOOR: the codex CLI does not report per-run spend, so the\n` +
+          `reviewer's cost is missing — including from the max_run_cost_usd ceiling.\n`,
+      );
+    }
     if (summary.branch) process.stdout.write(`branch ${summary.branch}\n`);
     if (summary.stoppedEarly) process.stdout.write(`stopped early: ${summary.stoppedEarly}\n`);
     if (counts.blocked > 0 || counts.skipped > 0) {

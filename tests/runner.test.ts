@@ -52,7 +52,7 @@ function stubAgent(script: Array<() => AgentRun>, label = 'stub'): AgentInvoker 
   } as unknown as AgentInvoker;
 }
 
-const ok = (): AgentRun => ({ text: 'done', ok: true, costUsd: 0.01, durationMs: 5 });
+const ok = (): AgentRun => ({ text: 'done', ok: true, costUsd: 0.01, costKnown: true, durationMs: 5 });
 
 /** Simulates a worker that edits a file, which is what makes a task committable. */
 const writes = (name: string, content = 'x\n') =>
@@ -238,10 +238,10 @@ describe('runner: failure handling', () => {
           () => ({
             text: JSON.stringify({ findings: [{ severity: 'major', summary: 'wrong' }] }),
             ok: true,
-            costUsd: 0,
+            costUsd: 0, costKnown: true,
             durationMs: 1,
           }),
-          () => ({ text: '{"findings":[]}', ok: true, costUsd: 0, durationMs: 1 }),
+          () => ({ text: '{"findings":[]}', ok: true, costUsd: 0, costKnown: true, durationMs: 1 }),
         ]),
       },
     );
@@ -277,7 +277,7 @@ describe('runner: failure handling', () => {
         builder: stubAgent([
           () => {
             writeFileSync(join(repo, 'a.txt'), 'x\n', 'utf8');
-            return { text: 'I disagree: the file was never touched.', ok: true, costUsd: 0, durationMs: 1 };
+            return { text: 'I disagree: the file was never touched.', ok: true, costUsd: 0, costKnown: true, durationMs: 1 };
           },
         ]),
         reviewer: stubAgent([
@@ -286,7 +286,7 @@ describe('runner: failure handling', () => {
               findings: [{ severity: 'blocker', summary: 'check.mjs was modified' }],
             }),
             ok: true,
-            costUsd: 0,
+            costUsd: 0, costKnown: true,
             durationMs: 1,
           }),
         ]),
@@ -345,7 +345,7 @@ describe('runner: the review gate', () => {
   const reviewJson = (findings: unknown[]): AgentRun => ({
     text: JSON.stringify({ findings }),
     ok: true,
-    costUsd: 0.002,
+    costUsd: 0.002, costKnown: true,
     durationMs: 3,
   });
 
@@ -397,7 +397,7 @@ describe('runner: the review gate', () => {
       [{ id: 'T1', title: 'first' }],
       {
         builder: stubAgent([writes('a.txt')]),
-        reviewer: stubAgent([() => ({ text: 'lgtm!', ok: true, costUsd: 0, durationMs: 1 })]),
+        reviewer: stubAgent([() => ({ text: 'lgtm!', ok: true, costUsd: 0, costKnown: true, durationMs: 1 })]),
       },
     );
 
@@ -432,5 +432,70 @@ describe('runner: resume', () => {
     const added = git(['log', '--oneline']).split('\n').length - commitsAfterFirst;
     expect(added).toBeLessThanOrEqual(1);
     expect(git(['log', '-1', '--format=%s'])).toMatch(/^kalfa: /);
+  });
+});
+
+describe('runner: honest accounting', () => {
+  const codexRun = (): AgentRun => ({
+    text: '{"findings":[]}',
+    ok: true,
+    costUsd: 0,
+    costKnown: false, // what the real codex provider reports
+    durationMs: 1,
+  });
+
+  it('flags the run total as incomplete when an agent cannot report its cost', async () => {
+    const { runner, store } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true },
+      },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([writes('a.txt')]), reviewer: stubAgent([codexRun]) },
+    );
+
+    await runner.run();
+    expect(store.run.costIncomplete).toBe(true);
+  });
+
+  it('does not flag a run where every agent reported its cost', async () => {
+    const { runner, store } = harness({}, [{ id: 'T1', title: 'first' }], {
+      builder: stubAgent([writes('a.txt')]),
+    });
+    await runner.run();
+    expect(store.run.costIncomplete).toBeUndefined();
+  });
+});
+
+describe('runner: retries see the whole history', () => {
+  it('tells attempt 3 what attempt 1 failed on, not just attempt 2', async () => {
+    const prompts: string[] = [];
+    const recording = {
+      label: 'stub',
+      provider: 'claude',
+      invoke: async (prompt: string) => {
+        prompts.push(prompt);
+        writeFileSync(join(repo, 'a.txt'), `attempt ${prompts.length}\n`, 'utf8');
+        return ok();
+      },
+    } as unknown as AgentInvoker;
+
+    const { runner } = harness(
+      {
+        gates: [{ name: 'always-fails', run: 'exit 1' }],
+        policy: { review: false, max_attempts: 3 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      { builder: recording },
+    );
+
+    await runner.run();
+
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain('Already tried and failed');
+    expect(prompts[2]).toContain('attempt 1 failed on');
+    expect(prompts[2]).toContain('attempt 2 failed on');
+    // The first attempt gets the plain task prompt, with no history at all.
+    expect(prompts[0]).not.toContain('Already tried and failed');
   });
 });

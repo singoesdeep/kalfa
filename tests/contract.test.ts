@@ -151,3 +151,46 @@ describe('reviewPrompt guards against fabricated cheating findings', () => {
     expect(reviewPrompt(task, [])).toMatch(/fabricated\s+blocker throws away correct work/);
   });
 });
+
+/**
+ * Attempt 3 used to know only about attempt 2, so a worker could oscillate:
+ * fix A breaks the type check, fix B breaks the test, fix A again. Each step
+ * looks locally reasonable and the task burns every attempt on two mistakes.
+ */
+describe('retry history', () => {
+  const prior = [
+    {
+      attempt: 1,
+      feedback: [{ kind: 'gate' as const, source: 'typecheck', detail: "TS2345: bad arg\nmore noise" }],
+    },
+    {
+      attempt: 2,
+      feedback: [{ kind: 'review' as const, source: 'codex', detail: '[major] race condition' }],
+    },
+  ];
+
+  it('lists every earlier failure, not just the most recent', () => {
+    const prompt = retryPrompt(task, 3, [{ kind: 'gate', source: 'test', detail: 'boom' }], prior);
+    expect(prompt).toContain('attempt 1 failed on');
+    expect(prompt).toContain('TS2345: bad arg');
+    expect(prompt).toContain('attempt 2 failed on');
+    expect(prompt).toContain('race condition');
+  });
+
+  it('summarises history to one line each, keeping only the current failure in full', () => {
+    const prompt = retryPrompt(task, 3, [{ kind: 'gate', source: 'test', detail: 'boom' }], prior);
+    // The noise from attempt 1 is dropped; only its first line survives.
+    expect(prompt).not.toContain('more noise');
+    expect(prompt).toContain('boom');
+  });
+
+  it('names the failure mode it exists to prevent', () => {
+    const prompt = retryPrompt(task, 3, [{ kind: 'gate', source: 'test', detail: 'x' }], prior);
+    expect(prompt).toMatch(/Try a different approach rather than the same one more carefully/);
+  });
+
+  it('omits the section entirely on the first retry, when there is no history', () => {
+    const prompt = retryPrompt(task, 2, [{ kind: 'gate', source: 'test', detail: 'x' }]);
+    expect(prompt).not.toContain('Already tried and failed');
+  });
+});

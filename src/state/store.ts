@@ -51,7 +51,9 @@ export class StateStore {
     renameSync(tmp, this.path);
   }
 
-  setRunMeta(meta: Partial<Pick<RunRecord, 'branch' | 'baseCommit' | 'finishedAt'>>): void {
+  setRunMeta(
+    meta: Partial<Pick<RunRecord, 'branch' | 'baseCommit' | 'finishedAt' | 'costIncomplete'>>,
+  ): void {
     Object.assign(this.record, meta);
     this.flush();
   }

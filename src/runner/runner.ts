@@ -4,7 +4,12 @@ import { topoOrder } from '../plan/schema.js';
 import { AgentInvoker } from '../agents/provider.js';
 import { blockingFailures, gatesForTask, runGates } from '../gates/gates.js';
 import { formatFindings, reviewTask } from '../review/review.js';
-import { AUTONOMY_CONTRACT, retryPrompt, taskPrompt } from '../prompts/contract.js';
+import {
+  AUTONOMY_CONTRACT,
+  retryPrompt,
+  taskPrompt,
+  type PriorAttempt,
+} from '../prompts/contract.js';
 import { Journal } from '../journal/journal.js';
 import { StateStore } from '../state/store.js';
 import { writeBoard } from '../board/board.js';
@@ -175,6 +180,19 @@ export class Runner {
   }
 
   /**
+   * Record once that a total is a floor, not a bill.
+   *
+   * The codex CLI does not report per-run cost, so a run with a codex reviewer
+   * spends more than it reports. Under-reporting would be bad on its own; it
+   * also means `max_run_cost_usd` is enforced against builder spend alone, and
+   * anyone who set a ceiling deserves to be told that.
+   */
+  private noteCostIncomplete(): void {
+    if (this.opts.store.run.costIncomplete) return;
+    this.opts.store.setRunMeta({ costIncomplete: true });
+  }
+
+  /**
    * Re-render TASKS.md. Called after every status change so a run killed
    * mid-task still leaves an accurate board on disk.
    */
@@ -234,6 +252,9 @@ export class Runner {
     journal.event('task_start', { taskId: task.id, title: task.title });
 
     let feedback: Feedback[] = [];
+    // Every attempt's failure, not just the last, so a worker can recognise
+    // when it is going round in circles.
+    const prior: PriorAttempt[] = [];
     this.lastFeedback = [];
     this.lastReport = '';
     this.lastGateResults = [];
@@ -242,6 +263,9 @@ export class Runner {
       if (this.opts.signal?.aborted) break;
 
       const attemptStart = Date.now();
+      if (attempt > 1 && feedback.length > 0) {
+        prior.push({ attempt: attempt - 1, feedback: [...feedback] });
+      }
       this.emit({
         type: 'attempt_start',
         taskId: task.id,
@@ -257,7 +281,7 @@ export class Runner {
               this.completedSoFar(),
               adrInstructions(nextAdrNumber(cwd), task.id),
             )
-          : retryPrompt(task, attempt, feedback);
+          : retryPrompt(task, attempt, feedback, prior);
 
       const run = await this.builder.invoke(prompt, {
         cwd,
@@ -266,6 +290,7 @@ export class Runner {
       });
 
       this.lastReport = run.text;
+      if (!run.costKnown) this.noteCostIncomplete();
       this.emit({
         type: 'agent_done',
         taskId: task.id,
@@ -364,6 +389,7 @@ export class Runner {
           blocking: review.blocking.length,
           ...(review.error ? { error: review.error } : {}),
         });
+        if (!review.costKnown) this.noteCostIncomplete();
         journal.event('review_done', {
           taskId: task.id,
           attempt,

@@ -119,11 +119,56 @@ export function taskPrompt(
   return parts.join('\n\n');
 }
 
+/** One earlier attempt's failure, for the retry prompt's history section. */
+export interface PriorAttempt {
+  attempt: number;
+  feedback: Feedback[];
+}
+
+/**
+ * A short record of what has already been tried and failed.
+ *
+ * Without it, attempt 3 knows only about attempt 2, so a worker can oscillate:
+ * fix A breaks the type check, fix B breaks the test, fix A again. Each
+ * attempt looks locally reasonable and the task burns all its attempts making
+ * the same two mistakes.
+ *
+ * Kept deliberately terse — one line per failure. The current failure is
+ * quoted in full below it; the history only needs to be enough to recognise a
+ * loop.
+ */
+export function historySection(prior: PriorAttempt[]): string {
+  if (prior.length === 0) return '';
+
+  const lines = prior.map((entry) => {
+    const causes = entry.feedback
+      .map((f) => {
+        const firstLine = f.detail.split('\n').find((l) => l.trim().length > 0) ?? '';
+        return `${f.kind}:${f.source} — ${firstLine.slice(0, 160)}`;
+      })
+      .join('; ');
+    return `- attempt ${entry.attempt} failed on ${causes || 'an unrecorded cause'}`;
+  });
+
+  return [
+    `## Already tried and failed`,
+    ...lines,
+    ``,
+    `If your next change repeats something in that list, it will fail the same`,
+    `way. Try a different approach rather than the same one more carefully.`,
+  ].join('\n');
+}
+
 /**
  * Retry prompt. The failure output is quoted verbatim rather than summarized —
  * a compiler error paraphrased by a model is worth less than the error.
  */
-export function retryPrompt(task: Task, attempt: number, feedback: Feedback[]): string {
+export function retryPrompt(
+  task: Task,
+  attempt: number,
+  feedback: Feedback[],
+  prior: PriorAttempt[] = [],
+): string {
   const blocks = feedback.map((f) => {
     const heading =
       f.kind === 'gate'
@@ -146,6 +191,7 @@ export function retryPrompt(task: Task, attempt: number, feedback: Feedback[]): 
       `done. It may be complete but wrong, or it may have stopped halfway. ` +
       `Fix it in place; do not start over, and do not redo work that is already ` +
       `correct.`,
+    ...(prior.length > 0 ? [historySection(prior)] : []),
     ...blocks,
     `Fix the causes above. Do not weaken or delete tests or checks to make them ` +
       `pass. If a check is genuinely wrong, fix the check and log why in ` +
