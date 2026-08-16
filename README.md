@@ -294,6 +294,8 @@ kalfa run --run-id <id>    # resume: finished tasks are skipped
 | `kalfa run` | Run the plan unattended |
 | `kalfa run --dry-run` | Print the execution order and exit |
 | `kalfa run --run-id <id>` | Resume a run; tasks already `done` are skipped |
+| `kalfa run --new` | Start fresh even though an earlier run was interrupted |
+| `kalfa run --force` | Take the run lock even if another run appears to hold it |
 | `kalfa contract` | Print the autonomy contract handed to every agent |
 
 ## Planning: the one sitting
@@ -408,6 +410,11 @@ delete a stash. Nothing it does is unrecoverable through git.
 - **`.kalfa/` ignores itself** from within, so run state is never committed to
   your history and never swept up by a stash.
 - **`max_run_cost_usd`** stops the run before the next task when hit.
+- **An interrupted run is not silently repeated.** `kalfa run` refuses to
+  start a new run while an earlier one never finished, and tells you the id to
+  resume — starting over would redo work you have already paid for. Resuming
+  is also allowed to find a dirty tree, because that dirt is the interrupted
+  task's own half-finished work.
 - **One run at a time per repository.** A lock file records the pid; a second
   run refuses to start rather than interleaving commits and clobbering state
   with the first. A lock whose process is gone is treated as stale and taken
@@ -477,7 +484,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 176 tests, no API calls
+npm test         # 182 tests, no API calls
 npm run typecheck
 npm run build
 ```

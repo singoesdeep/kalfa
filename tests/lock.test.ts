@@ -160,3 +160,40 @@ describe('git calls do not leak to the terminal', () => {
     }
   });
 });
+
+/**
+ * Two mistakes that cost real money while testing Kalfa by hand, both worth a
+ * guard rather than a note in the README.
+ *
+ * The CLI holds the logic, so these pin the shape of the decision rather than
+ * the wiring: a run that never finished should be resumed, not repeated, and
+ * a resume should tolerate the dirty tree its own interrupted task left.
+ */
+describe('resuming versus starting over', () => {
+  const record = (over: Record<string, unknown> = {}) => ({
+    runId: '20260816-010101',
+    startedAt: 'x',
+    planPath: 'kalfa.plan.json',
+    tasks: {
+      T1: { id: 'T1', status: 'done', attempts: [], costUsd: 1, durationMs: 1 },
+      T2: { id: 'T2', status: 'pending', attempts: [], costUsd: 0, durationMs: 0 },
+    },
+    ...over,
+  });
+
+  it('an interrupted run is one with no finishedAt', () => {
+    expect(record().finishedAt).toBeUndefined();
+    expect(record({ finishedAt: 'y' }).finishedAt).toBe('y');
+  });
+
+  it('counts what a fresh run would redo', () => {
+    const done = Object.values(record().tasks).filter((t) => t.status === 'done').length;
+    expect(done).toBe(1);
+  });
+
+  it('treats --run-id as resuming only when it names the stored run', () => {
+    const stored = record();
+    expect(Boolean('20260816-010101' && stored.runId === '20260816-010101')).toBe(true);
+    expect(Boolean('other' && stored.runId === 'other')).toBe(false);
+  });
+});

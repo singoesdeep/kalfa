@@ -40,17 +40,31 @@ function fail(message: string): never {
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
 const usd = (n: number): string => `$${n.toFixed(4)}`;
 
-/** Preflight: everything that must be true before an unattended run starts. */
-function preflight(cwd: string): void {
+/**
+ * Preflight: everything that must be true before an unattended run starts.
+ *
+ * The dirty-tree rule is relaxed when resuming. A run killed mid-task leaves
+ * that task's work in the tree by design — the retry prompt tells the worker
+ * to go and read it — so refusing would strand the user at exactly the moment
+ * resume exists for. It is reported rather than silently accepted.
+ */
+function preflight(cwd: string, resuming = false): void {
   if (!git.isRepo(cwd)) fail('not a git repository — kalfa relies on git for commits and rollback');
   if (!git.hasCommits(cwd)) fail('this repository has no commits yet — make an initial commit first');
-  if (!git.isClean(cwd)) {
-    const lines = git.statusLines(cwd).slice(0, 10);
+  if (git.isClean(cwd)) return;
+
+  const lines = git.statusLines(cwd).slice(0, 10);
+  if (!resuming) {
     fail(
       `working tree is dirty — commit or stash first, so kalfa can tell its own work from yours:\n` +
         lines.map((l) => `  ${l}`).join('\n'),
     );
   }
+  process.stdout.write(
+    `resuming with uncommitted work in the tree — treating it as the interrupted task's:\n` +
+      lines.map((l) => `  ${l}\n`).join('') +
+      `\n`,
+  );
 }
 
 program
@@ -450,12 +464,14 @@ program
   .option('--run-id <id>', 'resume an existing run instead of starting a new one')
   .option('--dry-run', 'print the execution order and exit')
   .option('--force', 'take the run lock even if another run appears to hold it')
+  .option('--new', 'start a fresh run even though an earlier one was interrupted')
   .action(async (opts: {
     config?: string;
     plan: string;
     runId?: string;
     dryRun?: boolean;
     force?: boolean;
+    new?: boolean;
   }) => {
     const cwd = process.cwd();
     let config, plan, planPath;
@@ -474,7 +490,27 @@ program
       return;
     }
 
-    preflight(cwd);
+    // An interrupted run is the common case for wanting to start again, and
+    // starting a *new* one instead silently redoes work already paid for.
+    const previous = readRunRecord(cwd);
+    const resuming = Boolean(opts.runId && previous?.runId === opts.runId);
+    if (!opts.runId && !opts.new && previous && !previous.finishedAt) {
+      const done = Object.values(previous.tasks).filter((t) => t.status === 'done').length;
+      fail(
+        `run ${previous.runId} was interrupted and never finished (${done} task(s) done).\n` +
+          `  resume it:      kalfa run --run-id ${previous.runId}\n` +
+          `  start over:     kalfa run --new\n` +
+          `Starting a new run would redo work you have already paid for.`,
+      );
+    }
+    if (!opts.runId && previous?.finishedAt) {
+      const done = Object.values(previous.tasks).filter((t) => t.status === 'done').length;
+      process.stdout.write(
+        `note: run ${previous.runId} already completed ${done} task(s). This is a fresh run and will redo them.\n\n`,
+      );
+    }
+
+    preflight(cwd, resuming);
 
     const runId = opts.runId ?? makeRunId();
 
