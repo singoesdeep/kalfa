@@ -366,6 +366,13 @@ them reported without forcing a retry.
 - **No quality measurement.** The gates prove the code compiles, passes tests
   and survives review. Nothing measures whether the result is *good*. That
   judgement is still yours — which is what the morning diff is for.
+- **The reviewer produces false positives, and one is enough to block a task.**
+  Observed live: it reported as a blocker that a test file had been modified
+  when git showed it untouched, which cost the task both its attempts. A
+  single reviewer opinion is treated as authoritative, with no second vote and
+  no way for the builder to win an argument. When gates are green and only the
+  review blocks, BLOCKED.md now records the finding, the worker'''s answer to
+  it, and where the work is parked — so you can adjudicate rather than guess.
 - **Retry feedback is per-attempt, not cumulative.** Attempt 3 is told about
   attempt 2's failure, not attempt 1's. It can read the working tree to see
   what was tried, but nothing stops it oscillating between two wrong fixes.
@@ -389,7 +396,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 116 tests, no API calls
+npm test         # 124 tests, no API calls
 npm run typecheck
 npm run build
 ```

@@ -82,6 +82,11 @@ export function treeHash(cwd: string): string {
   return git(['write-tree'], cwd);
 }
 
+/** The tree of the last commit — the baseline a task's work is measured against. */
+export function headTreeHash(cwd: string): string {
+  return git(['rev-parse', 'HEAD^{tree}'], cwd);
+}
+
 export function createBranch(cwd: string, name: string): void {
   git(['checkout', '-b', name], cwd);
 }

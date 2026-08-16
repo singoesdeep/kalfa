@@ -62,6 +62,10 @@ export interface RunSummary {
 export class Runner {
   private readonly builder: AgentInvoker;
   private readonly reviewer?: AgentInvoker;
+  /** Carried out of the attempt loop so a blocked task can explain itself. */
+  private lastFeedback: Feedback[] = [];
+  private lastReport = '';
+  private lastGateResults: GateResult[] = [];
 
   constructor(private readonly opts: RunnerOptions) {
     const make =
@@ -230,12 +234,14 @@ export class Runner {
     journal.event('task_start', { taskId: task.id, title: task.title });
 
     let feedback: Feedback[] = [];
+    this.lastFeedback = [];
+    this.lastReport = '';
+    this.lastGateResults = [];
 
     for (let attempt = 1; attempt <= config.policy.max_attempts; attempt += 1) {
       if (this.opts.signal?.aborted) break;
 
       const attemptStart = Date.now();
-      const treeBefore = git.treeHash(cwd);
       this.emit({
         type: 'attempt_start',
         taskId: task.id,
@@ -259,6 +265,7 @@ export class Runner {
         ...(this.opts.signal ? { signal: this.opts.signal } : {}),
       });
 
+      this.lastReport = run.text;
       this.emit({
         type: 'agent_done',
         taskId: task.id,
@@ -290,17 +297,22 @@ export class Runner {
 
       if (!run.ok) {
         record('agent_failed');
-        feedback = [
+        feedback = this.lastFeedback = [
           { kind: 'agent', source: this.builder.label, detail: run.error ?? 'worker failed' },
         ];
         continue;
       }
 
-      // An unchanged tree means nothing was implemented. Treat it as a failure:
-      // the alternative is an empty commit and a task marked done.
-      if (git.treeHash(cwd) === treeBefore) {
+      // "Has this task produced any work at all?" — measured against the last
+      // commit, NOT against the start of this attempt.
+      //
+      // Measuring per-attempt was wrong and cost real work: a retry that
+      // correctly concluded the earlier attempt was already right, and
+      // changed nothing, was scored as having done nothing. The task then
+      // exhausted its attempts and its perfectly good fix was stashed.
+      if (git.treeHash(cwd) === git.headTreeHash(cwd)) {
         record('agent_failed');
-        feedback = [
+        feedback = this.lastFeedback = [
           {
             kind: 'agent',
             source: this.builder.label,
@@ -317,6 +329,7 @@ export class Runner {
       refreshAdrIndex(cwd);
 
       const gateResults = gates.length > 0 ? await runGates(gates, cwd, this.opts.signal) : [];
+      this.lastGateResults = gateResults;
       this.emit({ type: 'gates_done', taskId: task.id, results: gateResults });
       journal.event('gates_done', {
         taskId: task.id,
@@ -327,7 +340,7 @@ export class Runner {
       const failed = blockingFailures(gateResults, gates);
       if (failed.length > 0) {
         record('gate_failed', { gates: gateResults });
-        feedback = failed.map((g) => ({
+        feedback = this.lastFeedback = failed.map((g) => ({
           kind: 'gate' as const,
           source: g.name,
           detail: g.output || `exited ${g.exitCode} with no output`,
@@ -386,7 +399,7 @@ export class Runner {
             blockingFindings: review.blocking.length,
             outcome: 'review_failed',
           });
-          feedback = [
+          feedback = this.lastFeedback = [
             {
               kind: 'review',
               source: this.reviewer.label,
@@ -441,6 +454,46 @@ export class Runner {
     return 'done';
   }
 
+  /**
+   * What the human needs in order to adjudicate, in the morning, in a minute.
+   *
+   * A live run produced a reviewer blocker that was simply false — it claimed
+   * a test file had been modified when git showed it untouched. The builder
+   * rebutted it correctly, and Kalfa threw the rebuttal away: BLOCKED.md said
+   * only "no attempt passed verification". Whoever read that had no way to
+   * know the work was fine and the reviewer was wrong.
+   *
+   * So the last thing that stopped it, and the worker's answer to it, are
+   * both recorded. Gate status is called out separately because "gates green,
+   * review blocked" is the shape of a disputed finding.
+   */
+  private blockedDetail(): string | undefined {
+    const parts: string[] = [];
+
+    if (this.lastGateResults.length > 0) {
+      const failed = this.lastGateResults.filter((g) => !g.ok && !g.skipped).map((g) => g.name);
+      parts.push(
+        failed.length === 0
+          ? 'GATES: all passed on the final attempt.'
+          : `GATES: failed — ${failed.join(', ')}`,
+      );
+    }
+
+    for (const item of this.lastFeedback) {
+      parts.push(`${item.kind.toUpperCase()} (${item.source}):\n${item.detail.slice(0, 1500)}`);
+    }
+
+    if (this.lastReport) {
+      parts.push(
+        `WORKER'S FINAL REPORT:\n${this.lastReport.slice(0, 1500)}\n\n` +
+          `If the worker is right and the blocker above is wrong, the work is in ` +
+          `the stash and only needs committing.`,
+      );
+    }
+
+    return parts.length > 0 ? parts.join('\n\n') : undefined;
+  }
+
   private blockTask(task: Task, reason: string): TaskStatus {
     const { cwd, config, store, journal } = this.opts;
 
@@ -457,12 +510,19 @@ export class Runner {
     // board away with the abandoned work, losing the record of the failure.
     this.refreshBoard();
     journal.event('task_blocked', { taskId: task.id, reason, stashRef });
-    journal.recordBlocked(
-      task.id,
-      task.title,
-      reason,
-      stashRef ? `Abandoned work parked in stash ${stashRef} — recover with: git stash list` : undefined,
-    );
+    const detail = [
+      this.blockedDetail(),
+      stashRef
+        ? [
+            `ABANDONED WORK: parked in stash ${stashRef}`,
+            `  git stash list          find it`,
+            `  git stash apply         bring it back into the working tree`,
+          ].join('\n')
+        : undefined,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    journal.recordBlocked(task.id, task.title, reason, detail || undefined);
     // BLOCKED.md is written after the stash on purpose: the report must survive
     // even though the work it describes was parked.
     this.commitBookkeeping(`kalfa: blocked ${task.id}`);

@@ -214,6 +214,96 @@ describe('runner: failure handling', () => {
     expect(store.task('T1').attempts.every((a) => a.outcome === 'agent_failed')).toBe(true);
   });
 
+  /**
+   * From a live run: attempt 1 fixed the bug, the reviewer raised a blocker
+   * that was simply false, and attempt 2 correctly answered "the earlier fix
+   * is right, nothing to change". Kalfa measured that attempt against the
+   * start of the attempt, saw no delta, scored it as having done nothing, and
+   * stashed a perfectly good fix.
+   */
+  it('does not punish a retry for leaving an earlier attempt\'s correct work alone', async () => {
+    let reviewCall = 0;
+    const { runner, store } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, max_attempts: 2 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([
+          writes('a.txt', 'the correct fix\n'),
+          ok, // attempt 2 changes nothing on purpose
+        ]),
+        reviewer: stubAgent([
+          () => ({
+            text: JSON.stringify({ findings: [{ severity: 'major', summary: 'wrong' }] }),
+            ok: true,
+            costUsd: 0,
+            durationMs: 1,
+          }),
+          () => ({ text: '{"findings":[]}', ok: true, costUsd: 0, durationMs: 1 }),
+        ]),
+      },
+    );
+    void reviewCall;
+
+    const summary = await runner.run();
+
+    // Attempt 2 must reach the gates and the reviewer, not be rejected as a
+    // no-op, so the false blocker can be withdrawn and the work committed.
+    expect(summary.counts.done).toBe(1);
+    expect(store.task('T1').attempts[1]?.outcome).toBe('passed');
+    expect(readFileSync(join(repo, 'a.txt'), 'utf8')).toBe('the correct fix\n');
+  });
+
+  it('still fails a first attempt that produced nothing at all', async () => {
+    const { runner, store } = harness({ policy: { review: false, max_attempts: 1 } }, [
+      { id: 'T1', title: 'first' },
+    ], { builder: stubAgent([ok]) });
+
+    await runner.run();
+    expect(store.task('T1').attempts[0]?.outcome).toBe('agent_failed');
+  });
+
+  it('records the dispute in BLOCKED.md so a human can adjudicate', async () => {
+    const { runner } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        gates: [{ name: 'check', run: 'exit 0' }],
+        policy: { review: true, max_attempts: 1 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([
+          () => {
+            writeFileSync(join(repo, 'a.txt'), 'x\n', 'utf8');
+            return { text: 'I disagree: the file was never touched.', ok: true, costUsd: 0, durationMs: 1 };
+          },
+        ]),
+        reviewer: stubAgent([
+          () => ({
+            text: JSON.stringify({
+              findings: [{ severity: 'blocker', summary: 'check.mjs was modified' }],
+            }),
+            ok: true,
+            costUsd: 0,
+            durationMs: 1,
+          }),
+        ]),
+      },
+    );
+
+    await runner.run();
+    const blocked = readFileSync(join(repo, 'BLOCKED.md'), 'utf8');
+
+    // Gates green + review blocked is the shape of a disputed finding, and
+    // the worker's answer is the other half of the argument.
+    expect(blocked).toContain('GATES: all passed');
+    expect(blocked).toContain('check.mjs was modified');
+    expect(blocked).toContain('I disagree');
+    expect(blocked).toContain('git stash apply');
+  });
+
   it('skips a task whose dependency was blocked, instead of building on sand', async () => {
     const { runner, store } = harness(
       { gates: [{ name: 'fails', run: 'exit 1' }], policy: { review: false, max_attempts: 1 } },
