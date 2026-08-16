@@ -86,10 +86,15 @@ describe('REVIEW_OUTPUT_SCHEMA', () => {
     expect(props.summary.type).toBe('string');
   });
 
-  it('asks the reviewer to classify its own claim, which is what the check runs off', () => {
+  // The two accepted values are named in the prompt, not constrained here.
+  // Strict structured output is particular about nullable types, an invalid
+  // schema 400s, and the CLI answers a 400 by retrying until the review times
+  // out — so a nullable field in this schema never carries an enum. It would
+  // buy nothing anyway: the parser maps anything unrecognised to "other".
+  it('asks for the claim as a plain nullable string, like every other optional field', () => {
     const props = REVIEW_OUTPUT_SCHEMA.properties.findings.items.properties;
-    expect(props.claim.enum).toContain('file_changed');
-    expect(props.claim.enum).toContain('other');
+    expect(props.claim.type).toEqual(['string', 'null']);
+    expect(props.claim).not.toHaveProperty('enum');
   });
 });
 

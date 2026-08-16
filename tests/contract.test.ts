@@ -150,6 +150,20 @@ describe('reviewPrompt guards against fabricated cheating findings', () => {
   it('states the cost of getting it wrong, not just the rule', () => {
     expect(reviewPrompt(task, [])).toMatch(/fabricated\s+blocker throws away correct work/);
   });
+
+  // The schema carries `claim` as a bare nullable string, so the prompt is the
+  // only place the two accepted values are stated. If it stops naming them,
+  // every finding degrades to "other" and the mechanical check goes quiet
+  // without anything failing.
+  it('names both claim labels, since the schema no longer constrains them', () => {
+    const prompt = reviewPrompt(task, []);
+    expect(prompt).toContain('"file_changed"');
+    expect(prompt).toContain('"other"');
+  });
+
+  it('says what the check does with a file_changed claim, so the label means something', () => {
+    expect(reviewPrompt(task, [])).toMatch(/discards it if the file is\s+not there/);
+  });
 });
 
 /**

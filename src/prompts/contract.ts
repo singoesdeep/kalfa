@@ -345,12 +345,22 @@ export const REVIEW_OUTPUT_SCHEMA = {
           /**
            * Whether this finding asserts something about what the diff did.
            *
-           * Enumerated rather than inferred: Kalfa can look a path up in the
-           * diff, but it cannot tell "you weakened this test" from "you should
-           * have updated this file", and only the first of those is refutable
-           * by a name lookup. The reviewer knows which it wrote.
+           * Classified by the reviewer rather than inferred: Kalfa can look a
+           * path up in the diff, but it cannot tell "you weakened this test"
+           * from "you should have updated this file", and only the first of
+           * those is refutable by a name lookup. The reviewer knows which it
+           * wrote.
+           *
+           * A bare nullable string, with the two accepted values named in the
+           * prompt instead of an `enum` here. Every other nullable field in
+           * this schema avoids enum for a reason — strict structured output is
+           * particular about what a nullable type may carry, an invalid schema
+           * 400s, and the CLI answers a 400 by retrying until the review times
+           * out. An enum would also buy nothing: the parser deliberately maps
+           * anything it does not recognise to "other", so a value outside the
+           * pair costs that finding its mechanical check and nothing more.
            */
-          claim: { type: ['string', 'null'], enum: ['file_changed', 'other', null] },
+          claim: { type: ['string', 'null'] },
         },
       },
     },
