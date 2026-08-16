@@ -22,6 +22,16 @@ function git(args: string[], cwd: string): string {
       cwd,
       encoding: 'utf8',
       maxBuffer: 32 * 1024 * 1024,
+      // Capture stderr instead of letting it reach the terminal.
+      //
+      // execFileSync forwards a child's stderr to the parent's by default, and
+      // several of these calls are expected to fail or to complain: probing for
+      // a branch that does not exist prints "fatal: Needed a single revision",
+      // and on Windows every staging operation emits a CRLF warning per file.
+      // Unfiltered, Kalfa's own progress output drowns in git chatter, and a
+      // "fatal:" line in the middle of a successful run reads as a crash.
+      // Failures still surface — the catch below reads stderr off the error.
+      stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
   } catch (err) {
     const e = err as { stderr?: string; message: string };

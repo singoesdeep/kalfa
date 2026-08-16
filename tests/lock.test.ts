@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -124,5 +125,40 @@ describe('isProcessAlive', () => {
   it('rejects nonsense rather than throwing', () => {
     expect(isProcessAlive(0)).toBe(false);
     expect(isProcessAlive(-1)).toBe(false);
+  });
+});
+
+/**
+ * Kalfa's progress output used to drown in git chatter on Windows: a CRLF
+ * warning per staged file, and a "fatal: Needed a single revision" from the
+ * routine probe for a branch that does not exist yet — which reads as a crash
+ * in the middle of a successful run.
+ */
+describe('git calls do not leak to the terminal', () => {
+  it('captures stderr rather than forwarding it', async () => {
+    const gitModule = await import('../src/git/git.js');
+    const repo = mkdtempSync(join(tmpdir(), 'kalfa-gitquiet-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'] });
+
+      const written: string[] = [];
+      const original = process.stderr.write.bind(process.stderr);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stderr as any).write = (chunk: string | Uint8Array): boolean => {
+        written.push(String(chunk));
+        return true;
+      };
+      try {
+        // Probing a branch that does not exist makes git print to stderr.
+        expect(gitModule.branchExists(repo, 'no-such-branch')).toBe(false);
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (process.stderr as any).write = original;
+      }
+
+      expect(written.join('')).not.toContain('fatal');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });
