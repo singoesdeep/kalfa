@@ -206,7 +206,10 @@ export function renderBoardPlain(plan: Plan, run: RunRecord): string {
     const status = record?.status ?? 'pending';
     const attempts = record && record.attempts.length > 1 ? `  (${record.attempts.length} attempts)` : '';
     const commit = record?.commit ? `  ${record.commit.slice(0, 8)}` : '';
-    return `  [${MARKER[status]}] ${task.id.padEnd(width)}  ${LABEL[status].padEnd(8)}${commit}${attempts}  ${task.title}`;
+    // Carried into the terminal view too: a task that rewrote a test is the
+    // one thing worth noticing at a glance, not only in the markdown board.
+    const tests = record?.protectedPaths?.length ? '  [tests modified]' : '';
+    return `  [${MARKER[status]}] ${task.id.padEnd(width)}  ${LABEL[status].padEnd(8)}${commit}${attempts}${tests}  ${task.title}`;
   });
   return lines.join('\n');
 }

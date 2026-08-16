@@ -198,6 +198,15 @@ program
     if (run.costIncomplete) {
       process.stdout.write(`cost is a floor — codex does not report its spend\n`);
     }
+    const withTests = plan.tasks.filter((t) => (run.tasks[t.id]?.protectedPaths ?? []).length > 0);
+    if (withTests.length > 0) {
+      process.stdout.write(
+        `\n${withTests.length} task(s) modified tests or checks — read those diffs first:\n`,
+      );
+      for (const task of withTests) {
+        process.stdout.write(`  ${task.id}  ${(run.tasks[task.id]?.protectedPaths ?? []).join(', ')}\n`);
+      }
+    }
     if (counts.blocked + counts.skipped + counts.pending > 0) {
       process.stdout.write(`\nresume with: kalfa run --run-id ${run.runId}\n`);
       process.stdout.write(`details in TASKS.md and BLOCKED.md\n`);
