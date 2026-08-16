@@ -16,6 +16,7 @@
  *   node scripts/smoke.mjs 1     plumbing        ~$0.05
  *   node scripts/smoke.mjs 2     reviewer        ~$0.10
  *   node scripts/smoke.mjs 3     does review catch cheating?  ~$0.30
+ *   node scripts/smoke.mjs 4     two dependent tasks          ~$0.60
  *
  * Each stage builds a throwaway git repository under the system temp
  * directory and leaves it there for inspection; nothing touches this repo.
@@ -34,8 +35,8 @@ if (!existsSync(KALFA)) {
 }
 
 const stage = process.argv[2];
-if (!['1', '2', '3'].includes(stage ?? '')) {
-  console.error('usage: node scripts/smoke.mjs <1|2|3>');
+if (!['1', '2', '3', '4'].includes(stage ?? '')) {
+  console.error('usage: node scripts/smoke.mjs <1|2|3|4>');
   process.exit(1);
 }
 
@@ -374,5 +375,107 @@ edit check.mjs. Watch what happens.`);
   C. check.mjs weakened, review PASSED it      -> the quality claim is broken`);
 }
 
-const stages = { 1: stage1, 2: stage2, 3: stage3 };
+
+/**
+ * Stage 4 — two dependent tasks.
+ *
+ * Everything above is a single task, which never exercises the part of Kalfa
+ * that is hardest to get right: a second task starts in a fresh session with
+ * no memory of the first, and has to find out what the first one actually did
+ * by reading the repository. T2 here can only be written correctly by looking
+ * at the implementation T1 produced — the task says so explicitly — so a
+ * passing run is evidence the hand-off works rather than that the model
+ * guessed the same convention twice.
+ */
+function stage4() {
+  const dir = makeRepo('multitask');
+  write(dir, 'package.json', JSON.stringify({ name: 'multi', type: 'module', version: '1.0.0', scripts: { test: 'node --test' } }, null, 2));
+  write(
+    dir,
+    'src/money.mjs',
+    `/** Formats an integer number of cents as a currency string. */
+export function formatCents(cents) {
+  return \`$\${(cents / 100).toFixed(2)}\`;
+}
+`,
+  );
+  write(
+    dir,
+    'test/money.test.mjs',
+    `import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { formatCents } from '../src/money.mjs';
+
+test('formats whole and fractional amounts', () => {
+  assert.equal(formatCents(1234), '$12.34');
+  assert.equal(formatCents(0), '$0.00');
+});
+`,
+  );
+  write(dir, 'kalfa.yaml', CONFIG_WITH_REVIEW.replace('node check.mjs', 'npm test'));
+  write(
+    dir,
+    'kalfa.plan.json',
+    JSON.stringify(
+      {
+        version: 1,
+        goal: 'Add negative-amount support to the money formatter and its inverse',
+        tasks: [
+          {
+            id: 'T1',
+            title: 'Handle negative amounts in formatCents',
+            details:
+              "src/money.mjs exports formatCents(cents). It currently produces '$-12.34' for " +
+              "negative input, which is wrong. Render the sign before the currency symbol: " +
+              "-1234 becomes '-$12.34'. Zero stays '$0.00' with no sign. Add cases to " +
+              'test/money.test.mjs for a negative amount, keeping the existing ones.',
+            deps: [],
+            files: ['src/money.mjs', 'test/money.test.mjs'],
+            acceptance: [
+              "formatCents(-1234) === '-$12.34'",
+              "formatCents(0) === '$0.00'",
+              'existing test cases are unchanged',
+              'npm test passes',
+            ],
+          },
+          {
+            id: 'T2',
+            title: 'Add parseMoney, the inverse of formatCents',
+            details:
+              'Add an exported parseMoney(text) to src/money.mjs returning the integer number ' +
+              'of cents. It must round-trip every value formatCents can produce, including the ' +
+              'negative form task T1 introduced — READ the current implementation of ' +
+              'formatCents to see exactly what that form is rather than assuming. Throw a ' +
+              'TypeError on input that does not match. Add tests including a round trip.',
+            deps: ['T1'],
+            files: ['src/money.mjs', 'test/money.test.mjs'],
+            acceptance: [
+              'parseMoney(formatCents(n)) === n for n in -1234, -1, 0, 1, 999999',
+              'parseMoney throws TypeError on unparseable input',
+              'npm test passes',
+            ],
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  commitAll(dir, 'seed');
+
+  console.log('STAGE 4 — two dependent tasks. T2 must read what T1 wrote.');
+  runKalfa(dir, ['run']);
+  inspect(dir);
+
+  console.log(`
+What to check:
+  - both tasks done, T2 committed after T1
+  - parseMoney handles the '-$12.34' form T1 chose. If it only handles '$-12.34'
+    the hand-off failed: T2 assumed a convention instead of reading the code
+  - TASKS.md flags that a test file was modified, and says whether any decision
+    records were written
+  - the working tree is clean at the end`);
+}
+
+const stages = { 1: stage1, 2: stage2, 3: stage3, 4: stage4 };
 stages[stage]();
