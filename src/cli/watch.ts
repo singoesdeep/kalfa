@@ -52,8 +52,16 @@ export interface WatchOptions {
 
 export async function watchRun(opts: WatchOptions): Promise<number> {
   const write = opts.write ?? ((text: string): void => void process.stdout.write(text));
-  const sleep =
-    opts.sleep ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms).unref?.()));
+  // NOT unref'd. This timer is the poll loop, and everything else in the loop
+  // is synchronous — an unref'd timer refs nothing, so node found an empty
+  // event loop and exited. Observed against a live run: `status --watch`
+  // printed the backlog, returned 0 one second in, and left the run going.
+  // Exit 0 means "finished, every task done", so the watcher was not merely
+  // giving up early, it was reporting success over a build still running.
+  //
+  // Every test injects its own `sleep`, which is why 335 of them passed over
+  // it. See the test that calls this with the real one.
+  const sleep = opts.sleep ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
   const pollMs = opts.pollMs ?? 1000;
   const stateDir = opts.stateDir ?? '.kalfa';
 

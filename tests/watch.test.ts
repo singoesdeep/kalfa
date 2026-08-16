@@ -1,6 +1,8 @@
+import { spawn } from 'node:child_process';
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JournalTail, describe as describeEvent, watchRun, WATCH_EXIT } from '../src/cli/watch.js';
 import { notify } from '../src/cli/notify.js';
@@ -154,6 +156,60 @@ describe('watchRun', () => {
     expect(code).toBe(WATCH_EXIT.died);
     expect(out).toContain('kalfa run --run-id r1');
   });
+
+  /**
+   * The only test here that runs the watcher as its own process.
+   *
+   * Every other one injects `sleep`, which is how a watcher that returned
+   * immediately passed the whole suite. Against a live run it printed the
+   * backlog and exited 0 after one second with the build still going — and 0
+   * means "finished, every task done", so it was not giving up early, it was
+   * reporting success over a run in progress. The cause was an `unref()` on
+   * the poll timer: nothing else in the loop is asynchronous, so an unref'd
+   * timer left node with an empty event loop and it exited.
+   *
+   * In-process this is invisible. The test runner's own handles keep the loop
+   * alive, so the unref'd version passes an in-process assertion — which is
+   * exactly what it did when this regression test was first written the easy
+   * way. Only a real process can tell the difference.
+   */
+  it('does not exit while the run it is watching is still alive', async () => {
+    writeFileSync(
+      join(dir, '.kalfa', 'run.lock'),
+      // This process, so the watcher's liveness check sees a live pid.
+      JSON.stringify({ pid: process.pid, runId: 'r1', startedAt: '2026-08-16T15:52:25Z' }),
+      'utf8',
+    );
+    state({ runId: 'r1', tasks: { T1: taskRecord('running') } });
+    journal({ runId: 'r1', type: 'run_start' });
+
+    const root = fileURLToPath(new URL('..', import.meta.url));
+    const child = spawn(
+      process.execPath,
+      [
+        join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
+        join(root, 'src', 'cli', 'main.ts'),
+        'status',
+        '--watch',
+        '--interval',
+        '50',
+      ],
+      { cwd: dir, stdio: 'ignore' },
+    );
+    const exited = new Promise<number | null>((resolve) => child.on('exit', resolve));
+
+    try {
+      await new Promise((r) => setTimeout(r, 2500));
+      expect(child.exitCode, 'the watcher exited while the run was still going').toBeNull();
+
+      // And it still ends when the run does, rather than hanging forever.
+      state({ runId: 'r1', finishedAt: '2026-08-16T18:00:00Z', tasks: { T1: taskRecord('done') } });
+      journal({ runId: 'r1', type: 'run_end' });
+      await expect(exited).resolves.toBe(WATCH_EXIT.clean);
+    } finally {
+      child.kill();
+    }
+  }, 20_000);
 
   it('catches up on a run already in progress before following it', async () => {
     state({ runId: 'r1', finishedAt: '2026-08-16T18:00:00Z', tasks: { T1: taskRecord('done') } });
