@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { describeAbort, parseClaudeResult, quoteForCmd } from '../src/agents/provider.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describeAbort, parseClaudeResult, quoteForCmd, runProcess } from '../src/agents/provider.js';
 
 /**
  * The exit code lies.
@@ -94,4 +97,81 @@ describe('quoteForCmd', () => {
       expect(quoteForCmd(arg), arg).toBe(`"${arg}"`);
     }
   });
+});
+
+/**
+ * A child that exits and leaves its pipes behind.
+ *
+ * This is the failure that hung a live run. `codex exec` finished its review,
+ * wrote the answer to disk, and did not exit; on Windows it was a grandchild
+ * of the shell wrapper, so it held the inherited stdout and stderr open. The
+ * runner resolved on `close`, which waits on the pipes rather than the
+ * process, so it waited — through its own 30-minute timeout, which killed the
+ * shell and not the agent, and therefore closed nothing.
+ *
+ * These drive the same shape with plain node processes: a child that spawns a
+ * long-lived grandchild inheriting its stdio, then exits or hangs.
+ */
+describe('runProcess: a lingering grandchild must not hold the run', () => {
+  let dir: string;
+
+  /**
+   * A script, not an inline `-e`. On Windows runProcess builds one command
+   * line for cmd.exe, and a multi-line program does not survive that — which
+   * is the same reason prompts travel on stdin.
+   */
+  const script = (name: string, body: string): string => {
+    const path = join(dir, name);
+    writeFileSync(path, body, 'utf8');
+    return path;
+  };
+
+  /** Hands stdio to a grandchild that outlives it, then exits. */
+  const leaky = (grandchildMs: number, parentExitMs: number): string =>
+    `const { spawn } = require('child_process');
+     spawn(process.execPath, ['-e', 'setTimeout(() => {}, ${grandchildMs})'],
+       { stdio: 'inherit', detached: true }).unref();
+     console.log('parent done');
+     setTimeout(() => process.exit(0), ${parentExitMs});`;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'kalfa-proc-'));
+  });
+
+  afterEach(() => {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // A grandchild may still hold the directory open on Windows.
+    }
+  });
+
+  it('settles when the child exits, without waiting for pipes it no longer owns', async () => {
+    const path = script('leaks.cjs', leaky(30_000, 0));
+    const started = Date.now();
+    const result = await runProcess(process.execPath, [path], '', {
+      cwd: dir,
+      timeoutMs: 60_000,
+    });
+
+    // The grandchild holds the pipes for 30s. Resolving on `close` alone
+    // would have waited out all of it.
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(result.timedOut).toBe(false);
+    expect(result.stdout).toContain('parent done');
+  }, 45_000);
+
+  it('still honours the timeout when the child itself will not exit', async () => {
+    const path = script('hangs.cjs', leaky(30_000, 30_000));
+    const started = Date.now();
+    const result = await runProcess(process.execPath, [path], '', {
+      cwd: dir,
+      timeoutMs: 1500,
+    });
+
+    // Before killTree the timeout killed the shell and left the agent holding
+    // the pipes, so this never settled at all.
+    expect(result.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(15_000);
+  }, 45_000);
 });

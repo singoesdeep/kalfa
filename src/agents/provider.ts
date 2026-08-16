@@ -63,6 +63,51 @@ export function quoteForCmd(arg: string): string {
   return /[\s"^&|<>()%!]/.test(arg) ? `"${arg}"` : arg;
 }
 
+/**
+ * How long to wait for stdio to drain after the child has exited.
+ *
+ * `close` is the correct event to resolve on — it means the process is gone
+ * AND its pipes are done — but it can never arrive (see `killTree`), and an
+ * unattended runner that waits forever for it is worse than one that resolves
+ * a few bytes short. Long enough for an ordinary flush, short enough that a
+ * stuck pipe costs seconds instead of the night.
+ */
+const STDIO_DRAIN_MS = 2000;
+
+/**
+ * Kill a child and everything it started.
+ *
+ * On Windows `spawn` runs through `cmd.exe` — the vendor CLIs are `.cmd` shims
+ * that cannot be executed directly — so the agent is a *grandchild*, and
+ * `child.kill()` kills only the shell. That is not a tidiness problem, it is
+ * the bug that hung a live run: the orphaned agent kept the inherited stdout
+ * and stderr pipes open, `close` never fired, and the promise below never
+ * settled. The 30-minute timeout fired on schedule and could not save it,
+ * because its own escape route ran through the same pipe.
+ *
+ * `taskkill /T` walks the tree. On POSIX there is no shell wrapper — `spawn`
+ * runs the binary directly — so the child is the agent and a plain kill
+ * reaches it. (Anything the agent itself spawned survives on POSIX; that is a
+ * smaller problem than changing process-group semantics for Ctrl-C.)
+ */
+function killTree(child: ReturnType<typeof spawn>): void {
+  if (child.pid === undefined) return;
+  if (process.platform === 'win32') {
+    try {
+      // Fire and forget: this runs on a timeout path where there is nobody to
+      // report to, and a failure here must not replace the real outcome.
+      spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }).on(
+        'error',
+        () => {},
+      );
+    } catch {
+      child.kill('SIGKILL');
+    }
+    return;
+  }
+  child.kill('SIGKILL');
+}
+
 /** Thin promise wrapper over spawn, with a hard timeout and stdin prompt. */
 export function runProcess(
   command: string,
@@ -88,7 +133,11 @@ export function runProcess(
     // puts the quoting under our control and silences the warning honestly,
     // rather than by suppressing it.
     const isWindows = process.platform === 'win32';
-    const commandLine = [command, ...args.map(quoteForCmd)].join(' ');
+    // The command is quoted like every argument. In production it is a bare
+    // `claude` or `codex` off PATH, which quoting leaves alone — but an
+    // absolute path to an interpreter under "C:\Program Files\" is a command
+    // line cmd.exe splits at the space, and the process never starts.
+    const commandLine = [command, ...args].map(quoteForCmd).join(' ');
     const child = isWindows
       ? spawn(commandLine, {
           cwd: opts.cwd,
@@ -109,13 +158,15 @@ export function runProcess(
     let settled = false;
     let lastOutputAt: string | undefined;
 
+    let drain: NodeJS.Timeout | undefined;
+
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      killTree(child);
     }, opts.timeoutMs);
 
     const onAbort = (): void => {
-      child.kill('SIGKILL');
+      killTree(child);
     };
     opts.signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -123,6 +174,7 @@ export function runProcess(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (drain) clearTimeout(drain);
       opts.signal?.removeEventListener('abort', onAbort);
       fn();
     };
@@ -146,8 +198,7 @@ export function runProcess(
       opts.onOutput?.('stderr', text);
     });
 
-    child.on('error', (err) => finish(() => reject(err)));
-    child.on('close', (code) =>
+    const settleWith = (code: number | null): void =>
       finish(() => {
         // A vendor that never terminates its last line would otherwise have it
         // dropped, taking the result object with it.
@@ -161,8 +212,26 @@ export function runProcess(
           ...(child.pid !== undefined ? { pid: child.pid } : {}),
           ...(lastOutputAt ? { lastOutputAt } : {}),
         });
-      }),
-    );
+      });
+
+    child.on('error', (err) => finish(() => reject(err)));
+
+    /**
+     * `close` is still the preferred settle — the process is gone and every
+     * byte it wrote has arrived. It is no longer the only one.
+     *
+     * A grandchild that inherited the pipes keeps them open after the child
+     * itself is gone, and `close` waits on the pipes, not the process. Live,
+     * that meant a finished reviewer whose answer was already on disk while
+     * the run sat in `review` indefinitely. So `exit` starts a bounded drain:
+     * the usual `close` almost always wins the race and nothing changes, and
+     * when it cannot come, the run continues with what it has instead of
+     * stopping for good.
+     */
+    child.on('exit', (code) => {
+      drain = setTimeout(() => settleWith(code), STDIO_DRAIN_MS);
+    });
+    child.on('close', (code) => settleWith(code));
 
     child.stdin.on('error', () => {
       // A process that exits before reading stdin (bad flags, auth failure)
