@@ -1,0 +1,324 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ConfigSchema } from '../src/config/schema.js';
+import { PlanSchema } from '../src/plan/schema.js';
+import { Runner } from '../src/runner/runner.js';
+import { StateStore } from '../src/state/store.js';
+import { Journal } from '../src/journal/journal.js';
+import type { AgentInvoker } from '../src/agents/provider.js';
+import type { AgentRun } from '../src/types.js';
+
+/**
+ * The runner is exercised against a real git repository in a temp dir, with
+ * the agents stubbed. Git behaviour — commit per task, stash on failure, a
+ * clean tree between tasks — is the part most worth testing, and mocking it
+ * would test nothing.
+ */
+
+let repo: string;
+
+const git = (args: string[]): string =>
+  execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+
+beforeEach(() => {
+  repo = mkdtempSync(join(tmpdir(), 'kalfa-test-'));
+  git(['init', '-q']);
+  git(['config', 'user.email', 'test@example.com']);
+  git(['config', 'user.name', 'Test']);
+  git(['config', 'commit.gpgsign', 'false']);
+  writeFileSync(join(repo, 'seed.txt'), 'seed\n', 'utf8');
+  git(['add', '.']);
+  git(['commit', '-q', '-m', 'seed']);
+});
+
+afterEach(() => {
+  rmSync(repo, { recursive: true, force: true });
+});
+
+/** A stub agent whose behaviour is scripted per invocation. */
+function stubAgent(script: Array<() => AgentRun>, label = 'stub'): AgentInvoker {
+  let call = 0;
+  return {
+    label,
+    provider: 'claude',
+    invoke: async () => {
+      const step = script[Math.min(call, script.length - 1)]!;
+      call += 1;
+      return step();
+    },
+  } as unknown as AgentInvoker;
+}
+
+const ok = (): AgentRun => ({ text: 'done', ok: true, costUsd: 0.01, durationMs: 5 });
+
+/** Simulates a worker that edits a file, which is what makes a task committable. */
+const writes = (name: string, content = 'x\n') =>
+  (): AgentRun => {
+    writeFileSync(join(repo, name), content, 'utf8');
+    return ok();
+  };
+
+function harness(
+  configOver: Record<string, unknown>,
+  tasks: Array<Record<string, unknown>>,
+  invokers: { builder: AgentInvoker; reviewer?: AgentInvoker },
+) {
+  const config = ConfigSchema.parse({
+    agents: { builder: { provider: 'claude' } },
+    gates: [],
+    policy: { review: false },
+    ...configOver,
+  });
+  const plan = PlanSchema.parse({ version: 1, goal: 'test', tasks });
+  const store = new StateStore(repo, 'testrun', 'plan.json');
+  const journal = new Journal(repo, 'testrun');
+  const runner = new Runner({
+    cwd: repo,
+    config,
+    plan,
+    planPath: 'plan.json',
+    runId: 'testrun',
+    store,
+    journal,
+    makeInvoker: (role) => (role === 'builder' ? invokers.builder : invokers.reviewer!),
+  });
+  return { runner, store, config };
+}
+
+describe('runner: the happy path', () => {
+  it('commits one commit per task and reports done', async () => {
+    const { runner, store } = harness({}, [{ id: 'T1', title: 'first' }, { id: 'T2', title: 'second' }], {
+      builder: stubAgent([writes('a.txt'), writes('b.txt')]),
+    });
+
+    const summary = await runner.run();
+
+    expect(summary.counts.done).toBe(2);
+    expect(summary.counts.blocked).toBe(0);
+    expect(store.task('T1').commit).toBeTruthy();
+    // seed + kalfa bookkeeping + one commit per task
+    expect(git(['log', '--oneline']).split('\n')).toHaveLength(4);
+    expect(git(['status', '--porcelain'])).toBe('');
+  });
+
+  it('records the run id in the commit message, so work is traceable', async () => {
+    const { runner } = harness({}, [{ id: 'T1', title: 'first' }], {
+      builder: stubAgent([writes('a.txt')]),
+    });
+    await runner.run();
+    expect(git(['log', '-1', '--format=%B'])).toContain('kalfa-run: testrun');
+  });
+
+  it('cuts a branch for the run', async () => {
+    const { runner } = harness({ policy: { review: false, branch: 'kalfa/{run_id}' } }, [
+      { id: 'T1', title: 'first' },
+    ], { builder: stubAgent([writes('a.txt')]) });
+    await runner.run();
+    expect(git(['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('kalfa/testrun');
+  });
+});
+
+describe('runner: kalfa keeps its own state out of the repository', () => {
+  // Regression guard. `git add --all` once committed run state into the user's
+  // history, and `git stash --include-untracked` once deleted it mid-run.
+  it('never commits .kalfa and survives a stash', async () => {
+    const { runner } = harness(
+      { gates: [{ name: 'fails', run: 'exit 1' }], policy: { review: false, max_attempts: 1 } },
+      [{ id: 'T1', title: 'a' }, { id: 'T2', title: 'b' }],
+      { builder: stubAgent([writes('a.txt'), writes('b.txt')]) },
+    );
+
+    await runner.run();
+
+    expect(git(['ls-files'])).not.toContain('.kalfa');
+    expect(existsSync(join(repo, '.kalfa', 'state.json'))).toBe(true);
+    expect(existsSync(join(repo, '.kalfa', 'journal.jsonl'))).toBe(true);
+  });
+});
+
+describe('runner: failure handling', () => {
+  it('retries on a failing gate and commits once it passes', async () => {
+    const flag = join(repo, 'pass.txt');
+    const { runner, store } = harness(
+      {
+        gates: [{ name: 'check', run: process.platform === 'win32' ? 'if exist pass.txt (exit 0) else (exit 1)' : 'test -f pass.txt' }],
+        policy: { review: false, max_attempts: 3 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([
+          writes('a.txt'),
+          () => {
+            writeFileSync(flag, 'ok\n', 'utf8');
+            return ok();
+          },
+        ]),
+      },
+    );
+
+    const summary = await runner.run();
+    expect(summary.counts.done).toBe(1);
+    expect(store.task('T1').attempts).toHaveLength(2);
+    expect(store.task('T1').attempts[0]?.outcome).toBe('gate_failed');
+    expect(store.task('T1').attempts[1]?.outcome).toBe('passed');
+  });
+
+  it('blocks a task whose gate never passes, and leaves a clean tree behind', async () => {
+    const { runner, store } = harness(
+      { gates: [{ name: 'always-fails', run: 'exit 1' }], policy: { review: false, max_attempts: 2 } },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([writes('a.txt')]) },
+    );
+
+    const summary = await runner.run();
+
+    expect(summary.counts.blocked).toBe(1);
+    expect(store.task('T1').attempts).toHaveLength(2);
+    // The abandoned work is stashed, not committed and not left in the tree.
+    expect(git(['status', '--porcelain'])).toBe('');
+    expect(git(['stash', 'list'])).toContain('blocked T1');
+    // The report survives the stash and is committed, not parked with the work.
+    expect(existsSync(join(repo, 'BLOCKED.md'))).toBe(true);
+    expect(git(['log', '-1', '--format=%s'])).toBe('kalfa: blocked T1');
+  });
+
+  it('treats an empty diff as a failure rather than a silent pass', async () => {
+    const { runner, store } = harness({ policy: { review: false, max_attempts: 2 } }, [
+      { id: 'T1', title: 'first' },
+    ], { builder: stubAgent([ok]) }); // never writes anything
+
+    const summary = await runner.run();
+    expect(summary.counts.done).toBe(0);
+    expect(summary.counts.blocked).toBe(1);
+    expect(store.task('T1').attempts.every((a) => a.outcome === 'agent_failed')).toBe(true);
+  });
+
+  it('skips a task whose dependency was blocked, instead of building on sand', async () => {
+    const { runner, store } = harness(
+      { gates: [{ name: 'fails', run: 'exit 1' }], policy: { review: false, max_attempts: 1 } },
+      [
+        { id: 'T1', title: 'first' },
+        { id: 'T2', title: 'second', deps: ['T1'] },
+      ],
+      { builder: stubAgent([writes('a.txt')]) },
+    );
+
+    const summary = await runner.run();
+    expect(summary.counts.blocked).toBe(1);
+    expect(summary.counts.skipped).toBe(1);
+    expect(store.task('T2').reason).toContain('dependencies not satisfied');
+  });
+
+  it('stops the run after too many consecutive blocks', async () => {
+    const { runner } = harness(
+      {
+        gates: [{ name: 'fails', run: 'exit 1' }],
+        policy: { review: false, max_attempts: 1, abort_after_consecutive_blocks: 2 },
+      },
+      [
+        { id: 'T1', title: 'a' },
+        { id: 'T2', title: 'b' },
+        { id: 'T3', title: 'c' },
+      ],
+      { builder: stubAgent([writes('a.txt'), writes('b.txt'), writes('c.txt')]) },
+    );
+
+    const summary = await runner.run();
+    expect(summary.stoppedEarly).toContain('consecutive');
+    expect(summary.counts.blocked).toBe(2);
+    expect(summary.counts.pending + summary.counts.skipped).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('runner: the review gate', () => {
+  const reviewJson = (findings: unknown[]): AgentRun => ({
+    text: JSON.stringify({ findings }),
+    ok: true,
+    costUsd: 0.002,
+    durationMs: 3,
+  });
+
+  it('retries when the reviewer reports a blocking finding, then commits when clean', async () => {
+    const { runner, store } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, blocking_severity: 'major', max_attempts: 3 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt'), writes('a.txt', 'fixed\n')]),
+        reviewer: stubAgent([
+          () => reviewJson([{ severity: 'major', summary: 'race condition' }]),
+          () => reviewJson([]),
+        ]),
+      },
+    );
+
+    const summary = await runner.run();
+    expect(summary.counts.done).toBe(1);
+    expect(store.task('T1').attempts[0]?.outcome).toBe('review_failed');
+    expect(store.task('T1').attempts[1]?.outcome).toBe('passed');
+    expect(readFileSync(join(repo, 'a.txt'), 'utf8')).toBe('fixed\n');
+  });
+
+  it('ignores findings below the blocking threshold', async () => {
+    const { runner } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, blocking_severity: 'major' },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt')]),
+        reviewer: stubAgent([() => reviewJson([{ severity: 'minor', summary: 'naming' }])]),
+      },
+    );
+
+    expect((await runner.run()).counts.done).toBe(1);
+  });
+
+  it('blocks rather than passes when the reviewer output cannot be parsed', async () => {
+    const { runner, store } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt')]),
+        reviewer: stubAgent([() => ({ text: 'lgtm!', ok: true, costUsd: 0, durationMs: 1 })]),
+      },
+    );
+
+    const summary = await runner.run();
+    expect(summary.counts.done).toBe(0);
+    expect(store.task('T1').reason).toContain('reviewer');
+  });
+});
+
+describe('runner: resume', () => {
+  it('skips tasks already marked done by an earlier run of the same id', async () => {
+    const first = harness({}, [{ id: 'T1', title: 'a' }, { id: 'T2', title: 'b' }], {
+      builder: stubAgent([writes('a.txt'), writes('b.txt')]),
+    });
+    await first.runner.run();
+    const commitsAfterFirst = git(['log', '--oneline']).split('\n').length;
+
+    let calls = 0;
+    const second = harness({}, [{ id: 'T1', title: 'a' }, { id: 'T2', title: 'b' }], {
+      builder: stubAgent([
+        () => {
+          calls += 1;
+          return ok();
+        },
+      ]),
+    });
+    await second.runner.run();
+
+    expect(calls).toBe(0);
+    expect(git(['log', '--oneline']).split('\n')).toHaveLength(commitsAfterFirst);
+  });
+});
