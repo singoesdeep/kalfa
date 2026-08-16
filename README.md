@@ -219,6 +219,21 @@ were green both times, because the tests exercised the ordinary range.
 That is the claim working: a second vendor finding a correctness bug in the
 obscure part of the input space, not offering a style opinion.
 
+The second of those runs is also the best evidence for the rest of the
+machinery, because it ended in a block. The retry fixed the exponential-
+notation gap and the reviewer immediately found a deeper one: `formatCents`
+divides by 100 in floating point, so `formatCents(9007199254540993)` loses a
+cent and nothing can round-trip it — inside the safe-integer range. Gates
+green, second opinion asked and confirmed, task blocked, work stashed.
+
+`BLOCKED.md` then carried the finding, the fact that the gates had passed, the
+worker's own account of what it did, and the stash to recover from. Verifying
+the claim took one `node -e` and about a minute, and the conclusion was that
+the reviewer was right and the *plan* was wrong: an acceptance criterion had
+demanded a round-trip that float division cannot provide. That is the intended
+shape of the morning — adjudicating a specific claim, not reconstructing a
+night.
+
 It also showed the limit. Given a test suite that was mathematically
 impossible to satisfy, the builder relaxed an assertion and wrote a decision
 record containing a correct impossibility proof. The reviewer read the
