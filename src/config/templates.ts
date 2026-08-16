@@ -43,6 +43,24 @@ policy:
   max_attempts: 3             # attempts per task, including the first
   review: true
   blocking_severity: major    # blocker | major | minor
+
+  # On the final attempt a blocking finding does not cost a retry, it costs
+  # the work — everything gets stashed. Reviewers are not oracles (one was
+  # observed inventing a blocker, then withdrawing it when asked again with
+  # nothing changed), so re-ask once before throwing the work away.
+  review_second_opinion: true
+
+  # Files a task should not normally be rewriting. Touching one is not
+  # forbidden — it is reported: the reviewer is told to verify the
+  # justification rather than accept it, and TASKS.md grows a section naming
+  # the change so you see it in the morning. Set to [] to disable.
+  protected_paths:
+    - "**/*.test.*"
+    - "**/*.spec.*"
+    - "**/test/**"
+    - "**/tests/**"
+    - "**/__tests__/**"
+    - "**/check.*"
   commit_per_task: true       # one commit per task, so failure never loses work
   branch: kalfa/{run_id}
   use_current_branch: false

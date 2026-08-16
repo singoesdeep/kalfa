@@ -121,6 +121,13 @@ program
         process.stdout.write(`  reviewer  (none — review disabled)\n`);
       }
       process.stdout.write(`  gates     ${config.gates.map((g) => g.name).join(', ') || '(none)'}\n`);
+      process.stdout.write(
+        `  protected ${
+          config.policy.protected_paths.length > 0
+            ? `${config.policy.protected_paths.length} pattern(s) — test changes get flagged`
+            : '(none — a task can rewrite your tests unremarked)'
+        }\n`,
+      );
       if (config.gates.length === 0) {
         process.stdout.write(
           `  warning:  no gates configured. Without machine checks, nothing verifies\n` +
