@@ -122,6 +122,37 @@ export function renderBoard(plan: Plan, run: RunRecord): string {
     );
   }
 
+  // Above "Needs you", because a test that moved with the implementation is
+  // the thing most worth a human's eyes and the thing least likely to have
+  // announced itself as a problem.
+  const touchedTests = ordered
+    .map((task) => ({ task, files: run.tasks[task.id]?.protectedPaths ?? [] }))
+    .filter((entry) => entry.files.length > 0);
+
+  if (touchedTests.length > 0) {
+    lines.push(
+      ``,
+      `## Tests and checks were modified`,
+      ``,
+      `These tasks changed files that are supposed to be judging the work.`,
+      `That is sometimes right and sometimes how a bad change gets through.`,
+      `Read these diffs first.`,
+      ``,
+    );
+    for (const { task, files } of touchedTests) {
+      const record = run.tasks[task.id];
+      lines.push(`### ${task.id}: ${task.title}`, ``);
+      for (const file of files) lines.push(`- \`${file}\``);
+      lines.push(
+        ``,
+        record?.commit
+          ? `\`git show ${record.commit.slice(0, 8)}\``
+          : `(not committed — the work is in the stash)`,
+        ``,
+      );
+    }
+  }
+
   const stuck = ordered.filter((task) => {
     const status = run.tasks[task.id]?.status;
     return status === 'blocked' || status === 'skipped';

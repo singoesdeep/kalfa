@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_PROTECTED_PATHS } from '../gates/protected.js';
 
 /**
  * `kalfa.yaml` — the operating envelope for an unattended run.
@@ -75,6 +76,16 @@ export const PolicySchema = z
     review: z.boolean().default(true),
     /** Findings at or above this severity force another attempt. */
     blocking_severity: z.enum(['blocker', 'major', 'minor']).default('major'),
+    /**
+     * Re-ask the reviewer once before a blocking finding costs the work.
+     *
+     * On the final attempt a block is not a retry, it is a stash: the work is
+     * thrown away. Reviewers are not oracles — one was observed inventing a
+     * blocker and withdrawing it when asked again with nothing changed — so a
+     * confirming read is cheap insurance at exactly the moment it matters.
+     * Only a clean second read overturns the block.
+     */
+    review_second_opinion: z.boolean().default(true),
     /** Commit after each task passes, so a failure never loses earlier work. */
     commit_per_task: z.boolean().default(true),
     /** Branch to create for the run. `{run_id}` is substituted. */
@@ -90,6 +101,16 @@ export const PolicySchema = z
     abort_after_consecutive_blocks: z.number().int().min(1).default(3),
     /** Ceiling for the entire run. Exceeding it stops before the next task. */
     max_run_cost_usd: z.number().positive().optional(),
+    /**
+     * Globs for files a task should not normally be rewriting — tests and
+     * checks. Touching one is not forbidden, it is *reported*: the reviewer is
+     * told to verify rather than accept the justification, and the change is
+     * surfaced on the board so you see it in the morning.
+     *
+     * Set to [] to disable. See src/gates/protected.ts for why this is a
+     * mechanical check rather than a judgement left to the reviewer.
+     */
+    protected_paths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
   })
   .strict();
 

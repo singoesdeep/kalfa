@@ -84,6 +84,8 @@ export interface TaskRecord {
   reason?: string;
   /** Stash ref holding the abandoned work, when a blocked task was stashed. */
   stashRef?: string;
+  /** Test or check files this task modified. Surfaced for human review. */
+  protectedPaths?: string[];
   costUsd: number;
   durationMs: number;
 }

@@ -147,6 +147,21 @@ export function changedFiles(cwd: string, sinceSha: string): string[] {
     .filter((line) => line.trim().length > 0);
 }
 
+/**
+ * Files the working tree changes relative to HEAD, untracked included.
+ *
+ * This is what the reviewer is about to look at, so it is what protected-path
+ * detection has to run against — the committed diff is too late.
+ */
+export function pendingFiles(cwd: string): string[] {
+  return statusLines(cwd)
+    .map((line) => line.slice(3).trim())
+    // Renames appear as "old -> new"; the new path is what was written.
+    .map((path) => (path.includes(' -> ') ? path.split(' -> ')[1]! : path))
+    .map((path) => path.replace(/^"|"$/g, ''))
+    .filter((path) => path.length > 0);
+}
+
 export function diffStat(cwd: string, sinceSha: string): string {
   return git(['diff', '--stat', `${sinceSha}..HEAD`], cwd);
 }

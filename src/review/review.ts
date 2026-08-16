@@ -91,8 +91,9 @@ export async function reviewTask(
   gateCommands: string[],
   policy: PolicyConfig,
   signal?: AbortSignal,
+  protectedCallout?: string,
 ): Promise<ReviewResult> {
-  const run = await reviewer.invoke(reviewPrompt(task, gateCommands), {
+  const run = await reviewer.invoke(reviewPrompt(task, gateCommands, protectedCallout), {
     cwd,
     outputSchema: REVIEW_OUTPUT_SCHEMA,
     ...(signal ? { signal } : {}),

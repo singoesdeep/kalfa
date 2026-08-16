@@ -566,6 +566,15 @@ function render(event: RunnerEvent): void {
         );
       }
       break;
+    case 'protected_touched':
+      process.stdout.write(
+        `  ! touched tests/checks: ${event.files.join(', ')} — flagged for review
+`,
+      );
+      break;
+    case 'second_opinion':
+      process.stdout.write(`  review   blocking — asking once more before discarding the work\n`);
+      break;
     case 'review_done':
       process.stdout.write(
         event.error

@@ -172,6 +172,46 @@ The reviewer is specifically instructed to hunt for *cheating* — deleted tests
 weakened assertions, disabled checks, functions stubbed to return constants —
 because that is the failure mode of an agent under pressure to make a gate pass.
 
+**What live runs actually showed.** On a money-splitting task the reviewer
+caught a real defect the builder had missed and the tests did not cover:
+floating-point arithmetic broke the exact-sum guarantee near
+`Number.MIN_SAFE_INTEGER`. It gave a counterexample, suggested BigInt, and
+asked for a regression case. That is the claim working — a second vendor
+finding a correctness bug, not a style opinion.
+
+It also showed the limit. Given a test suite that was mathematically
+impossible to satisfy, the builder relaxed an assertion and wrote a decision
+record containing a correct impossibility proof. The reviewer read the
+rationale and passed it **without checking the proof**. That call happened to
+be right. The risk it exposes is not "the builder deletes assertions" — under
+several deliberately adversarial framings the builder never once took the
+cheap way out. It is that **a test-weakening diff arrived with a persuasive
+argument attached, and the argument was accepted rather than verified.** A
+fabricated rationale would look identical from the reviewer'''s seat.
+
+Which is why that particular check is not left to the reviewer alone — see
+below.
+
+### Protected paths
+
+Kalfa cannot judge whether a given test change is legitimate; that needs
+knowledge and stakes only you have. What it can do is make sure the change is
+never quiet.
+
+Any task whose diff touches `policy.protected_paths` (tests, specs, `check.*`,
+by default) gets three things:
+
+1. the reviewer is handed the file list with an instruction to **verify a
+   justification rather than weigh it**, and told in as many words that a
+   convincing explanation for weakening a test is what a wrong change looks
+   like;
+2. the paths are recorded on the task;
+3. `TASKS.md` grows a **Tests and checks were modified** section, above
+   "Needs you", with the `git show` command for each.
+
+Mechanical detection, human judgement. Set `protected_paths: []` to switch it
+off.
+
 ## Requirements
 
 - Node 20+
@@ -405,7 +445,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 150 tests, no API calls
+npm test         # 172 tests, no API calls
 npm run typecheck
 npm run build
 ```

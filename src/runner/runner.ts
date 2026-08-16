@@ -3,6 +3,7 @@ import type { Plan, Task } from '../plan/schema.js';
 import { topoOrder } from '../plan/schema.js';
 import { AgentInvoker } from '../agents/provider.js';
 import { blockingFailures, gatesForTask, runGates } from '../gates/gates.js';
+import { protectedAmong, protectedPathsCallout } from '../gates/protected.js';
 import { formatFindings, reviewTask } from '../review/review.js';
 import {
   AUTONOMY_CONTRACT,
@@ -39,6 +40,8 @@ export type RunnerEvent =
   | { type: 'agent_done'; taskId: string; ok: boolean; costUsd: number; durationMs: number }
   | { type: 'gates_done'; taskId: string; results: GateResult[] }
   | { type: 'review_done'; taskId: string; findings: number; blocking: number; error?: string }
+  | { type: 'second_opinion'; taskId: string }
+  | { type: 'protected_touched'; taskId: string; files: string[] }
   | { type: 'task_done'; taskId: string; status: TaskStatus; commit?: string; reason?: string }
   | { type: 'run_end'; counts: Record<TaskStatus, number>; costUsd: number };
 
@@ -373,6 +376,26 @@ export class Runner {
         continue;
       }
 
+      // Detected before the review, because it changes what the review is
+      // told to do: a test that moves with the implementation is the one thing
+      // a reviewer must not take on trust.
+      const touchedProtected = protectedAmong(
+        git.pendingFiles(cwd),
+        config.policy.protected_paths,
+      );
+      if (touchedProtected.length > 0) {
+        store.setStatus(task.id, 'running', { protectedPaths: touchedProtected });
+        this.refreshBoard();
+        journal.event('protected_paths_touched', {
+          taskId: task.id,
+          attempt,
+          files: touchedProtected,
+        });
+        this.emit({ type: 'protected_touched', taskId: task.id, files: touchedProtected });
+      }
+      const callout =
+        touchedProtected.length > 0 ? protectedPathsCallout(touchedProtected) : undefined;
+
       if (wantsReview && this.reviewer) {
         const review = await reviewTask(
           this.reviewer,
@@ -381,6 +404,7 @@ export class Runner {
           gateCommands,
           config.policy,
           this.opts.signal,
+          callout,
         );
         this.emit({
           type: 'review_done',
@@ -414,22 +438,69 @@ export class Runner {
           return this.blockTask(task, `reviewer could not run: ${review.error}`);
         }
 
-        if (review.blocking.length > 0) {
+        let blocking = review.blocking;
+        let reviewCostUsd = review.costUsd;
+
+        // Second opinion, but only where it changes the outcome.
+        //
+        // On the last attempt a blocking finding does not cost a retry, it
+        // costs the work: everything gets stashed. And a reviewer is not an
+        // oracle — one was observed inventing a blocker ("the test file was
+        // modified" when git showed it untouched), then withdrawing it when
+        // asked again with nothing changed. Re-asking once, when the gates
+        // are green and the alternative is throwing the work away, is worth
+        // one extra review call.
+        const lastChance = attempt === config.policy.max_attempts;
+        if (blocking.length > 0 && lastChance && config.policy.review_second_opinion) {
+          this.emit({ type: 'second_opinion', taskId: task.id });
+          const second = await reviewTask(
+            this.reviewer,
+            task,
+            cwd,
+            gateCommands,
+            config.policy,
+            this.opts.signal,
+            callout,
+          );
+          if (!second.costKnown) this.noteCostIncomplete();
+          reviewCostUsd += second.costUsd;
+          journal.event('second_opinion', {
+            taskId: task.id,
+            attempt,
+            firstFindings: review.blocking,
+            secondFindings: second.blocking,
+            error: second.error,
+            withdrawn: !second.error && second.blocking.length === 0,
+          });
+          // Only a clean second read overturns the block. An unreadable one
+          // is not evidence of anything, so the original finding stands.
+          if (!second.error && second.blocking.length === 0) {
+            blocking = [];
+            this.emit({
+              type: 'review_done',
+              taskId: task.id,
+              findings: second.findings.length,
+              blocking: 0,
+            });
+          }
+        }
+
+        if (blocking.length > 0) {
           store.addAttempt(task.id, {
             attempt,
             agentCostUsd: run.costUsd,
-            reviewCostUsd: review.costUsd,
+            reviewCostUsd,
             durationMs: Date.now() - attemptStart,
             gates: gateResults,
             reviewFindings: review.findings.length,
-            blockingFindings: review.blocking.length,
+            blockingFindings: blocking.length,
             outcome: 'review_failed',
           });
           feedback = this.lastFeedback = [
             {
               kind: 'review',
               source: this.reviewer.label,
-              detail: formatFindings(review.blocking),
+              detail: formatFindings(blocking),
             },
           ];
           continue;
@@ -437,7 +508,7 @@ export class Runner {
 
         record('passed', {
           gates: gateResults,
-          reviewCostUsd: review.costUsd,
+          reviewCostUsd,
           reviewFindings: review.findings.length,
         });
       } else {

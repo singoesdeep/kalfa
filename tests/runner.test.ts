@@ -499,3 +499,181 @@ describe('runner: retries see the whole history', () => {
     expect(prompts[0]).not.toContain('Already tried and failed');
   });
 });
+
+/**
+ * Observed live: the reviewer invented a blocker ("the test file was
+ * modified" when git showed it untouched), the task exhausted its attempts,
+ * and correct work was stashed. On the final attempt a block costs the work,
+ * not a retry, so it is worth one confirming read before throwing it away.
+ */
+describe('runner: second opinion before discarding work', () => {
+  const blocks = (): AgentRun => ({
+    text: JSON.stringify({ findings: [{ severity: 'blocker', summary: 'invented problem' }] }),
+    ok: true,
+    costUsd: 0,
+    costKnown: false,
+    durationMs: 1,
+  });
+  const clean = (): AgentRun => ({
+    text: '{"findings":[]}',
+    ok: true,
+    costUsd: 0,
+    costKnown: false,
+    durationMs: 1,
+  });
+
+  const setup = (reviewerScript: Array<() => AgentRun>, maxAttempts = 1) =>
+    harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        gates: [{ name: 'check', run: 'exit 0' }],
+        policy: { review: true, max_attempts: maxAttempts },
+      },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([writes('a.txt')]), reviewer: stubAgent(reviewerScript) },
+    );
+
+  it('commits the work when the reviewer withdraws its finding on the second read', async () => {
+    const { runner, store } = setup([blocks, clean]);
+    const summary = await runner.run();
+
+    expect(summary.counts.done).toBe(1);
+    expect(store.task('T1').attempts[0]?.outcome).toBe('passed');
+    expect(readFileSync(join(repo, 'a.txt'), 'utf8')).toBe('x\n');
+  });
+
+  it('still blocks when the second read confirms the finding', async () => {
+    const { runner, store } = setup([blocks, blocks]);
+    const summary = await runner.run();
+
+    expect(summary.counts.blocked).toBe(1);
+    expect(store.task('T1').attempts[0]?.outcome).toBe('review_failed');
+  });
+
+  it('does not overturn a block on an unreadable second read — that is not evidence', async () => {
+    const unreadable = (): AgentRun => ({
+      text: 'lgtm I guess',
+      ok: true,
+      costUsd: 0,
+      costKnown: false,
+      durationMs: 1,
+    });
+    const { runner, store } = setup([blocks, unreadable]);
+    expect((await runner.run()).counts.blocked).toBe(1);
+    expect(store.task('T1').reason).toBeTruthy();
+  });
+
+  it('does not spend a second review on a non-final attempt, where a retry is cheaper', async () => {
+    let reviews = 0;
+    const counting = {
+      label: 'stub',
+      provider: 'codex',
+      invoke: async (): Promise<AgentRun> => {
+        reviews += 1;
+        return reviews === 1 ? blocks() : clean();
+      },
+    } as unknown as AgentInvoker;
+
+    const { runner } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        gates: [{ name: 'check', run: 'exit 0' }],
+        policy: { review: true, max_attempts: 3 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt'), writes('a.txt', 'second\n')]),
+        reviewer: counting,
+      },
+    );
+
+    await runner.run();
+    // Attempt 1 blocked and simply retried; no confirming read was spent.
+    expect(reviews).toBe(2);
+  });
+
+  it('can be turned off', async () => {
+    const { runner } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        gates: [{ name: 'check', run: 'exit 0' }],
+        policy: { review: true, max_attempts: 1, review_second_opinion: false },
+      },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([writes('a.txt')]), reviewer: stubAgent([blocks, clean]) },
+    );
+    expect((await runner.run()).counts.blocked).toBe(1);
+  });
+});
+
+describe('runner: a task that rewrites tests never does it quietly', () => {
+  it('flags the protected file, records it, and tells the reviewer to verify', async () => {
+    let reviewPromptSeen = '';
+    const reviewer = {
+      label: 'stub',
+      provider: 'codex',
+      invoke: async (prompt: string): Promise<AgentRun> => {
+        reviewPromptSeen = prompt;
+        return { text: '{"findings":[]}', ok: true, costUsd: 0, costKnown: false, durationMs: 1 };
+      },
+    } as unknown as AgentInvoker;
+
+    const { runner, store } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, max_attempts: 1 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([
+          () => {
+            writeFileSync(join(repo, 'thing.test.js'), 'weakened assertion\n', 'utf8');
+            return ok();
+          },
+        ]),
+        reviewer,
+      },
+    );
+
+    await runner.run();
+
+    expect(store.task('T1').protectedPaths).toEqual(['thing.test.js']);
+    expect(reviewPromptSeen).toContain('This diff modifies protected files');
+    expect(reviewPromptSeen).toContain('thing.test.js');
+    expect(reviewPromptSeen).toMatch(/verify the justification independently/);
+
+    // And it survives into the morning report rather than only the prompt.
+    expect(readFileSync(join(repo, 'TASKS.md'), 'utf8')).toContain(
+      'Tests and checks were modified',
+    );
+  });
+
+  it('says nothing when only source files changed', async () => {
+    let reviewPromptSeen = '';
+    const reviewer = {
+      label: 'stub',
+      provider: 'codex',
+      invoke: async (prompt: string): Promise<AgentRun> => {
+        reviewPromptSeen = prompt;
+        return { text: '{"findings":[]}', ok: true, costUsd: 0, costKnown: false, durationMs: 1 };
+      },
+    } as unknown as AgentInvoker;
+
+    const { runner, store } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, max_attempts: 1 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([writes('src.js')]), reviewer },
+    );
+
+    await runner.run();
+
+    expect(store.task('T1').protectedPaths).toBeUndefined();
+    expect(reviewPromptSeen).not.toContain('This diff modifies protected files');
+    expect(readFileSync(join(repo, 'TASKS.md'), 'utf8')).not.toContain(
+      'Tests and checks were modified',
+    );
+  });
+});

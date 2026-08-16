@@ -200,7 +200,11 @@ export function retryPrompt(
 }
 
 /** Instructions handed to the reviewer agent. It only ever reads the diff. */
-export function reviewPrompt(task: Task, gateCommands: string[]): string {
+export function reviewPrompt(
+  task: Task,
+  gateCommands: string[],
+  protectedCallout?: string,
+): string {
   return [
     `You are reviewing an autonomous agent's uncommitted work in this repository.`,
     `Run \`git diff HEAD\` (and \`git status\`) to see it, plus \`git diff HEAD --stat\` for scope.`,
@@ -228,6 +232,7 @@ export function reviewPrompt(task: Task, gateCommands: string[]): string {
     `   untouched. A task is about to be judged on your answer — a fabricated`,
     `   blocker throws away correct work. Quote the offending line from the diff,`,
     `   or do not raise the finding.`,
+    ...(protectedCallout ? [protectedCallout] : []),
     `3. **Scope** — changes unrelated to the task.`,
     `4. **Integration** — does it match the conventions and types of the surrounding code?`,
     ``,
