@@ -205,12 +205,19 @@ The reviewer is specifically instructed to hunt for *cheating* — deleted tests
 weakened assertions, disabled checks, functions stubbed to return constants —
 because that is the failure mode of an agent under pressure to make a gate pass.
 
-**What live runs actually showed.** On a money-splitting task the reviewer
-caught a real defect the builder had missed and the tests did not cover:
-floating-point arithmetic broke the exact-sum guarantee near
-`Number.MIN_SAFE_INTEGER`. It gave a counterexample, suggested BigInt, and
-asked for a regression case. That is the claim working — a second vendor
-finding a correctness bug, not a style opinion.
+**What live runs actually showed.** Twice, on unrelated tasks, the reviewer
+caught a real defect the builder had missed and the gates could not see.
+
+On a money-splitting task, floating-point arithmetic broke the exact-sum
+guarantee near `Number.MIN_SAFE_INTEGER`; it gave a counterexample, suggested
+BigInt, and asked for a regression case. On a currency parser asked to
+round-trip everything its formatter could produce, it noticed that
+`Number.prototype.toFixed` switches to exponential notation above 1e21 — so
+`formatCents(1e24)` returns `"$1e+22"`, which the parser threw on. The gates
+were green both times, because the tests exercised the ordinary range.
+
+That is the claim working: a second vendor finding a correctness bug in the
+obscure part of the input space, not offering a style opinion.
 
 It also showed the limit. Given a test suite that was mathematically
 impossible to satisfy, the builder relaxed an assertion and wrote a decision
