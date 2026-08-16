@@ -543,11 +543,20 @@ them reported without forcing a retry.
 - **`kalfa plan` validates structure, not judgement.** It checks that ids
   resolve, dependencies exist and there are no cycles. Nothing checks that the
   tasks are the right tasks.
+- **The planner invents dependencies.** On a six-task run it produced a
+  strictly linear chain — every task depending on exactly its predecessor,
+  including a documentation task that depended on the CLI task before it. The
+  prompt tells it not to do this. It did it anyway, and the cost was real: when
+  task 4 failed, tasks 5 and 6 were skipped for a dependency neither of them
+  needed.
+- **Tasks that block cascade further than they should**, for the same reason.
+  A skipped task is skipped on its declared dependency, and a declared
+  dependency that is not a real one turns one failure into three.
 
 ## Development
 
 ```bash
-npm test         # 212 tests, no API calls
+npm test         # 217 tests, no API calls
 npm run typecheck
 npm run build
 ```
