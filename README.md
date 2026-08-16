@@ -466,8 +466,11 @@ them reported without forcing a retry.
   On a very long plan it is still a rising per-task cost, and nothing prunes
   or scopes it to the task at hand.
 - **Nothing verifies that an agent actually recorded its decisions.** The
-  contract requires it and the reviewer can notice its absence, but a task can
-  pass every gate having quietly assumed something and written nothing down.
+  contract requires it, but a task can pass every gate having quietly assumed
+  something and written nothing down. Kalfa counts the records each task
+  produces and `TASKS.md` says plainly when a run completed tasks and recorded
+  nothing — which is the right outcome if the spec left nothing open, and
+  indistinguishable from the wrong one. A live two-task run did exactly this.
 - **The reviewer knows what is coming but not what happened.** It is given the
   titles of the tasks still to come, so it can flag a change that paints one of
   them into a corner — but it still sees only the current diff, not how the
@@ -484,7 +487,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 182 tests, no API calls
+npm test         # 190 tests, no API calls
 npm run typecheck
 npm run build
 ```

@@ -168,3 +168,44 @@ describe('cost is never presented as complete when it is not', () => {
     expect(board).not.toMatch(/FLOOR/);
   });
 });
+
+/**
+ * A live multi-task run completed two tasks and wrote no decision records at
+ * all. That is the correct outcome when the spec left nothing to assume — and
+ * indistinguishable, from the outside, from assumptions made silently. Kalfa
+ * cannot tell which; it can refuse to let the question go unasked.
+ */
+describe('decision records that were never written', () => {
+  const done = (id: string, adrsWritten?: number) => ({
+    id,
+    status: 'done' as const,
+    attempts: [],
+    costUsd: 0,
+    durationMs: 0,
+    ...(adrsWritten === undefined ? {} : { adrsWritten }),
+  });
+
+  it('says so when a run completed tasks and recorded nothing', () => {
+    const record: RunRecord = {
+      ...run,
+      tasks: { T1: done('T1', 0), T2: done('T2', 0), T3: done('T3', 0) },
+    };
+    const board = renderBoard(plan, record);
+    expect(board).toContain('## No decisions were recorded');
+    expect(board).toContain('3 task(s) completed');
+    expect(board).toMatch(/right outcome if the spec left nothing open/);
+  });
+
+  it('stays quiet when decisions were recorded', () => {
+    const record: RunRecord = {
+      ...run,
+      tasks: { T1: done('T1', 2), T2: done('T2', 0), T3: done('T3', 0) },
+    };
+    expect(renderBoard(plan, record)).not.toContain('No decisions were recorded');
+  });
+
+  it('stays quiet when nothing completed, where zero records means nothing', () => {
+    const record: RunRecord = { ...run, tasks: {} };
+    expect(renderBoard(plan, record)).not.toContain('No decisions were recorded');
+  });
+});

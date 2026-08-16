@@ -14,7 +14,7 @@ import {
 import { Journal } from '../journal/journal.js';
 import { StateStore } from '../state/store.js';
 import { writeBoard } from '../board/board.js';
-import { adrInstructions, nextAdrNumber, refreshAdrIndex } from '../adr/adr.js';
+import { adrInstructions, nextAdrNumber, readAdrs, refreshAdrIndex } from '../adr/adr.js';
 import * as git from '../git/git.js';
 import type { AttemptRecord, Feedback, GateResult, TaskStatus } from '../types.js';
 
@@ -255,6 +255,7 @@ export class Runner {
     const wantsReview = task.review ?? config.policy.review;
 
     store.setStatus(task.id, 'running');
+    const adrsBefore = readAdrs(cwd).length;
     this.refreshBoard();
     // Land the board BEFORE the builder starts.
     //
@@ -537,17 +538,18 @@ export class Runner {
         record('passed', { gates: gateResults });
       }
 
-      return this.completeTask(task, attempt);
+      return this.completeTask(task, attempt, adrsBefore);
     }
 
     return this.blockTask(task, `no attempt passed verification in ${config.policy.max_attempts} attempts`);
   }
 
-  private completeTask(task: Task, attempt: number): TaskStatus {
+  private completeTask(task: Task, attempt: number, adrsBefore = 0): TaskStatus {
     const { cwd, config, store, journal } = this.opts;
+    const adrsWritten = Math.max(0, readAdrs(cwd).length - adrsBefore);
 
     if (!config.policy.commit_per_task) {
-      store.setStatus(task.id, 'done');
+      store.setStatus(task.id, 'done', { adrsWritten });
       this.refreshBoard();
       journal.event('task_done', { taskId: task.id, attempt });
       this.emit({ type: 'task_done', taskId: task.id, status: 'done' });
@@ -566,7 +568,7 @@ export class Runner {
       .trim();
 
     const commit = git.commitAll(cwd, message);
-    store.setStatus(task.id, 'done', { ...(commit ? { commit } : {}) });
+    store.setStatus(task.id, 'done', { adrsWritten, ...(commit ? { commit } : {}) });
     this.refreshBoard();
     journal.event('task_done', { taskId: task.id, attempt, commit });
     this.emit({ type: 'task_done', taskId: task.id, status: 'done', ...(commit ? { commit } : {}) });

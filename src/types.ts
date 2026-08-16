@@ -86,6 +86,15 @@ export interface TaskRecord {
   stashRef?: string;
   /** Test or check files this task modified. Surfaced for human review. */
   protectedPaths?: string[];
+  /**
+   * Decision records this task produced.
+   *
+   * Kalfa cannot tell whether a task *should* have recorded a decision. It can
+   * count, and a run that resolved a dozen tasks without writing one is worth
+   * noticing: either the spec left nothing to assume, or assumptions were made
+   * silently. Both readings matter, and only the reader can tell them apart.
+   */
+  adrsWritten?: number;
   costUsd: number;
   durationMs: number;
 }

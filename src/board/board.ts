@@ -153,6 +153,24 @@ export function renderBoard(plan: Plan, run: RunRecord): string {
     }
   }
 
+  // A run that resolved every task without recording one decision is worth
+  // noticing. It means either the spec left nothing to assume — the good case
+  // — or assumptions were made and never written down. Kalfa cannot tell which;
+  // it can refuse to let the question go unasked.
+  const adrs = Object.values(run.tasks).reduce((sum, t) => sum + (t.adrsWritten ?? 0), 0);
+  if (counts.done > 0 && adrs === 0) {
+    lines.push(
+      ``,
+      `## No decisions were recorded`,
+      ``,
+      `${counts.done} task(s) completed and none produced a decision record.`,
+      `That is the right outcome if the spec left nothing open. If it did leave`,
+      `something open, the assumption was made anyway and is now only visible in`,
+      `the diff.`,
+      ``,
+    );
+  }
+
   const stuck = ordered.filter((task) => {
     const status = run.tasks[task.id]?.status;
     return status === 'blocked' || status === 'skipped';
