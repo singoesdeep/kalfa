@@ -103,6 +103,8 @@ function argsForClaude(agent: AgentConfig, systemPrompt?: string): string[] {
   if (agent.model) args.push('--model', agent.model);
   if (agent.max_turns !== undefined) args.push('--max-turns', String(agent.max_turns));
   if (systemPrompt) args.push('--append-system-prompt', systemPrompt);
+  if (agent.allowed_tools?.length) args.push('--allowed-tools', ...agent.allowed_tools);
+  if (agent.disallowed_tools?.length) args.push('--disallowed-tools', ...agent.disallowed_tools);
   for (const dir of agent.add_dirs) args.push('--add-dir', dir);
   if (agent.permission_mode === 'bypassPermissions') args.push('--dangerously-skip-permissions');
   return args;

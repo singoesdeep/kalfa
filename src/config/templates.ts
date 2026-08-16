@@ -18,6 +18,10 @@ agents:
     provider: codex
     sandbox: read-only        # the reviewer reads the diff; it must not edit
     timeout_ms: 900000
+    # If you use claude as the reviewer instead, deny the write tools — a
+    # reviewer that can edit becomes a second builder and quietly "fixes"
+    # what it should be reporting:
+    # disallowed_tools: [Edit, Write, MultiEdit, NotebookEdit]
 
 # Gates are what replaces your approval. They must be deterministic and
 # non-interactive — anything that opens a pager or reads stdin will hang.

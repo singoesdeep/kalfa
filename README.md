@@ -84,10 +84,10 @@ npm link            # optional: puts `kalfa` on your PATH
 
 ```bash
 cd your-project
-kalfa init                 # writes kalfa.yaml + kalfa.plan.json
-# edit the plan into real tasks — this is the part you sit through
-kalfa validate             # checks config + plan, prints execution order
-kalfa run                  # go to bed
+kalfa init                              # writes kalfa.yaml + a plan template
+kalfa plan "add rate limiting to the webhook dispatcher"
+kalfa validate                          # checks config + plan, execution order
+kalfa run                               # go to bed
 ```
 
 In the morning:
@@ -102,13 +102,55 @@ kalfa run --run-id <id>    # resume: finished tasks are skipped
 | Command | What it does |
 |---|---|
 | `kalfa init [--force]` | Write starter `kalfa.yaml` and `kalfa.plan.json` |
+| `kalfa plan "<goal>"` | Inspect the repo, ask its questions once, write a validated plan |
+| `kalfa plan --no-interview` | Generate straight from the goal, asking nothing |
+| `kalfa plan --print-prompt` | Print the planning prompt and exit. No API call |
 | `kalfa validate` | Check config and plan, print execution order. No API calls |
 | `kalfa run` | Run the plan unattended |
 | `kalfa run --dry-run` | Print the execution order and exit |
 | `kalfa run --run-id <id>` | Resume a run; tasks already `done` are skipped |
 | `kalfa contract` | Print the autonomy contract handed to every agent |
 
-## The plan
+## Planning: the one sitting
+
+`kalfa plan "<goal>"` reads your repository, asks **every question it has at
+once**, and writes a validated plan.
+
+```
+$ kalfa plan "add rate limiting to the webhook dispatcher"
+reading the repository...
+
+3 questions. Press Enter to accept the suggested answer.
+This is the only time you will be asked.
+
+1. Should the limit be per-tenant or global?
+   why: per-tenant needs a keyed bucket store, which is a separate task
+   [per-tenant, keyed on the existing tenant_id] >
+
+2. Reject over-limit requests, or queue them?
+   [reject with 429 and Retry-After] > queue up to 100, then reject
+
+...
+writing the plan...
+
+wrote kalfa.plan.json — 5 tasks, $0.4120
+```
+
+The batching is the point. Interactive frameworks ask one question at a time,
+across phases, over hours — that is what chains you to the keyboard. Kalfa
+asks everything in one sitting and then never asks again. The planner is
+required to supply a real suggested answer for every question, so pressing
+Enter through all of them is a legitimate way to use it.
+
+The planner runs with `Edit`, `Write` and `MultiEdit` denied at the CLI level.
+It reads your repository; it cannot start the work before you have seen the plan.
+
+**A plan that does not validate is never written.** Generation runs a repair
+loop: schema errors (unknown dependency, cycle, duplicate id) are fed back
+verbatim and it tries again, up to three times, then fails loudly. An invalid
+plan discovered at 3am costs you the whole night.
+
+## The plan format
 
 The plan is the contract between the one interactive session you sit through
 and every unattended run that follows.
@@ -137,6 +179,10 @@ and every unattended run that follows.
 it is not a bug, but it does mean the quality of your morning is decided by the
 quality of your `details` and `acceptance` fields. Write acceptance criteria a
 test can assert, not ones a human must judge.
+
+Which is why the plan is worth reading before you run it, even when `kalfa
+plan` wrote it. Reading a generated plan takes five minutes; a bad plan costs
+you a night.
 
 ## The autonomy contract
 
@@ -211,11 +257,17 @@ them reported without forcing a retry.
   task was solved in a way that will make task 7 impossible.
 - **An unparseable review blocks the task.** A reviewer that cannot be read is
   never treated as a pass, which means reviewer flakiness costs you tasks.
+- **The planner is never re-consulted.** If the plan turns out to be wrong at
+  task 4, no agent revises it — task 4 is attempted as written, and blocks if
+  it cannot be done. Replanning is your job, in the morning.
+- **`kalfa plan` validates structure, not judgement.** It checks that ids
+  resolve, dependencies exist and there are no cycles. Nothing checks that the
+  tasks are the right tasks.
 
 ## Development
 
 ```bash
-npm test         # 53 tests, no API calls
+npm test         # 72 tests, no API calls
 npm run typecheck
 npm run build
 ```

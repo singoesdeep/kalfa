@@ -2,6 +2,17 @@
 import { Command } from 'commander';
 import { existsSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createInterface } from 'node:readline/promises';
+import { AgentInvoker } from '../agents/provider.js';
+import {
+  askQuestions,
+  generatePlan,
+  planPrompt,
+  plannerAgent,
+  PlanGenerationError,
+  type Answer,
+} from '../plan/generate.js';
+import { ensureStateDir } from '../state/dir.js';
 import { ConfigError, loadConfig, loadPlan } from '../config/load.js';
 import { Runner, type RunnerEvent } from '../runner/runner.js';
 import { StateStore, makeRunId } from '../state/store.js';
@@ -119,6 +130,129 @@ program
   .action(() => {
     process.stdout.write(`${AUTONOMY_CONTRACT}\n`);
   });
+
+program
+  .command('plan')
+  .argument('<goal>', 'what the whole run should accomplish, in one sentence')
+  .description('Generate a validated kalfa.plan.json by inspecting this repository')
+  .option('-o, --out <path>', 'where to write the plan', 'kalfa.plan.json')
+  .option('-m, --model <model>', 'model for the planner')
+  .option('--no-interview', 'skip the questions and generate straight from the goal')
+  .option('-q, --questions <n>', 'maximum questions to ask', '6')
+  .option('-f, --force', 'overwrite an existing plan file')
+  .option('--print-prompt', 'print the planning prompt and exit — no API call')
+  .action(async (goal: string, opts: PlanOptions) => {
+    const cwd = process.cwd();
+    const outPath = resolve(cwd, opts.out);
+
+    if (opts.printPrompt) {
+      process.stdout.write(`${planPrompt(goal, [])}\n`);
+      return;
+    }
+    if (existsSync(outPath) && !opts.force) {
+      fail(`${opts.out} already exists — pass --force to overwrite it`);
+    }
+    if (!git.isRepo(cwd)) fail('not a git repository — plan from inside the repo you want built');
+
+    const planner = new AgentInvoker(plannerAgent(opts.model));
+    const controller = new AbortController();
+    process.once('SIGINT', () => controller.abort());
+
+    let costUsd = 0;
+    const answers: Answer[] = [];
+
+    if (opts.interview) {
+      process.stdout.write('reading the repository...\n');
+      const asked = await askQuestions(
+        planner,
+        goal,
+        cwd,
+        Number(opts.questions) || 6,
+        controller.signal,
+      );
+      costUsd += asked.costUsd;
+
+      if (asked.questions.length === 0) {
+        process.stdout.write('no questions — the repository and goal were clear enough.\n\n');
+      } else {
+        // Every question at once, in one sitting. This is the only time Kalfa
+        // will ask you anything; after this the run is unattended.
+        process.stdout.write(
+          `\n${asked.questions.length} question${asked.questions.length === 1 ? '' : 's'}. ` +
+            `Press Enter to accept the suggested answer.\nThis is the only time you will be asked.\n\n`,
+        );
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        try {
+          for (const [i, q] of asked.questions.entries()) {
+            process.stdout.write(`${i + 1}. ${q.question}\n`);
+            if (q.why) process.stdout.write(`   why: ${q.why}\n`);
+            const reply = (await rl.question(`   [${q.suggested}] > `)).trim();
+            answers.push({
+              question: q.question,
+              answer: reply || q.suggested,
+              defaulted: reply.length === 0,
+            });
+            process.stdout.write('\n');
+          }
+        } finally {
+          rl.close();
+        }
+      }
+    }
+
+    process.stdout.write('writing the plan...\n');
+    try {
+      const result = await generatePlan(planner, {
+        goal,
+        cwd,
+        answers,
+        signal: controller.signal,
+        onAttempt: (attempt, errors) => {
+          if (attempt > 1) {
+            process.stdout.write(`  attempt ${attempt} — previous plan failed validation:\n`);
+            for (const line of (errors ?? '').split('\n').slice(0, 5)) {
+              process.stdout.write(`    ${line}\n`);
+            }
+          }
+        },
+      });
+      costUsd += result.costUsd;
+
+      writeFileSync(outPath, `${JSON.stringify(result.plan, null, 2)}\n`, 'utf8');
+
+      process.stdout.write(`\nwrote ${opts.out} — ${result.plan.tasks.length} tasks, ${usd(costUsd)}\n\n`);
+      for (const [i, task] of topoOrder(result.plan).entries()) {
+        const deps = task.deps.length > 0 ? `  <- ${task.deps.join(', ')}` : '';
+        process.stdout.write(`  ${String(i + 1).padStart(2)}. ${task.id}: ${task.title}${deps}\n`);
+      }
+      process.stdout.write(
+        `\nRead it before running. Every vague \`details\` field becomes an\n` +
+          `assumption in DECISIONS.md that nobody will be awake to catch.\n` +
+          `Then: kalfa run\n`,
+      );
+    } catch (err) {
+      if (err instanceof PlanGenerationError) {
+        process.stderr.write(`kalfa: ${err.message}\n`);
+        if (err.lastOutput) {
+          const scratch = resolve(cwd, '.kalfa', 'last-plan-attempt.txt');
+          ensureStateDir(cwd);
+          writeFileSync(scratch, err.lastOutput, 'utf8');
+          process.stderr.write(`the planner's last output is in ${scratch}\n`);
+        }
+        process.exit(1);
+      }
+      throw err;
+    }
+  });
+
+interface PlanOptions {
+  out: string;
+  model?: string;
+  interview: boolean;
+  questions: string;
+  force?: boolean;
+  printPrompt?: boolean;
+}
 
 program
   .command('run')

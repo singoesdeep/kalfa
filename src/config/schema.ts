@@ -25,6 +25,13 @@ export const AgentSchema = z
     /** codex sandbox policy. Ignored for the claude provider. */
     sandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']).default('workspace-write'),
     max_turns: z.number().int().positive().optional(),
+    /**
+     * Tool restrictions, claude provider only. The reviewer should be denied
+     * write tools: a reviewer that can edit is a second builder, and it will
+     * "fix" what it finds instead of reporting it.
+     */
+    allowed_tools: z.array(z.string()).optional(),
+    disallowed_tools: z.array(z.string()).optional(),
     /** Extra directories the agent may write to, beyond the repo root. */
     add_dirs: z.array(z.string()).default([]),
     /** Appended to the provider's system prompt, after Kalfa's own contract. */
