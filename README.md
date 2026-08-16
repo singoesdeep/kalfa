@@ -439,6 +439,7 @@ Every line a run prints is short, and each one names the file behind it. Under
 | `builder.report.md` | its final message |
 | `gates/<name>.stdout.log`, `.stderr.log` | each gate's full output, per stream, untrimmed |
 | `diff.patch`, `diff.stat.txt` | the diff the reviewer was actually shown |
+| `review.stdout.log`, `.stderr.log` | everything the reviewer's CLI printed, written as it arrived |
 | `review.findings.json` | its complete findings, every severity, each with git's verdict on its claim |
 | `review.raw.txt` | its untruncated response — including when it could not be parsed |
 | `decision.json` | what the attempt concluded, why, and which files prove it |
@@ -764,6 +765,15 @@ notify:
   the finding, the worker'''s answer to it, where the work is parked, and the
   attempt directory holding the reviewer'''s complete response and the diff it
   was shown — so you can adjudicate against the evidence rather than guess.
+- **An agent can finish its work and refuse to exit.** Observed with
+  `codex exec` 0.147.0: the reviewer wrote its findings one minute in and then
+  never left. Kalfa no longer hangs on that — it kills the process tree at the
+  timeout, and because `--output-last-message` is a completion signal, a
+  timeout holding a written answer is treated as a review that happened rather
+  than one that did not. But the task still pays the whole `timeout_ms` in
+  wall-clock before that, and the run says so on the line: `codex produced its
+  answer but did not exit`. If you see it every task, lower the reviewer's
+  `timeout_ms` — it is the ceiling on what the misbehaviour costs.
 - **Only the claude provider reports tool-level activity.** `claude -p` is run
   with `--output-format stream-json`, so every tool call the builder makes is
   an event you can watch. `codex exec` reports nothing comparable, so a codex

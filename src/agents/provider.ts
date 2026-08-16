@@ -108,6 +108,62 @@ function killTree(child: ReturnType<typeof spawn>): void {
   child.kill('SIGKILL');
 }
 
+/**
+ * What a finished `codex exec` amounts to.
+ *
+ * Pure, and separate from the invocation, because the interesting judgement is
+ * here rather than in the plumbing: **the answer file is a completion signal,
+ * not just a convenience.** `codex exec --output-last-message` writes the
+ * agent's final message when the task is done, and a live run proved that is
+ * not the same event as the process leaving. The reviewer finished one minute
+ * in, wrote its findings to that file, and then never exited. Kalfa waited out
+ * its entire timeout and was about to block a task whose review had passed —
+ * with the review sitting on disk the whole time.
+ *
+ * So a timeout holding a written answer is a process that would not leave, not
+ * a review that did not happen, and the run continues on what the agent
+ * actually said. The forgiveness is deliberately narrow: only a timeout, and
+ * only with a non-empty file. A non-zero exit is a different claim about what
+ * happened, and stdout is a fallback that carries no evidence of finishing.
+ */
+export function codexOutcome(res: {
+  /** Contents of --output-last-message, or undefined if it was never written. */
+  answerFile?: string | undefined;
+  stdout: string;
+  code: number | null;
+  timedOut: boolean;
+  timeoutMs: number;
+  stderr: string;
+}): { text: string; ok: boolean; lingered: boolean; note?: string; error?: string } {
+  const answer = res.answerFile?.trim() ?? '';
+  const text = answer.length > 0 ? answer : res.stdout.trim();
+  const lingered = res.timedOut && answer.length > 0;
+  const ok = lingered || (res.code === 0 && !res.timedOut);
+
+  return {
+    text,
+    ok,
+    lingered,
+    // Salvaged, never silently. The work stands, but a CLI that has to be
+    // killed every time costs the whole timeout on every task it does it on,
+    // and that is a thing to go and fix rather than absorb quietly.
+    ...(lingered
+      ? {
+          note:
+            `codex produced its answer but did not exit; killed after ` +
+            `${res.timeoutMs}ms and its written answer used`,
+        }
+      : {}),
+    ...(ok
+      ? {}
+      : {
+          error: res.timedOut
+            ? `timed out after ${res.timeoutMs}ms`
+            : `codex exited ${res.code}: ${res.stderr.trim().slice(-2000)}`,
+        }),
+  };
+}
+
 /** Thin promise wrapper over spawn, with a hard timeout and stdin prompt. */
 export function runProcess(
   command: string,
@@ -493,14 +549,23 @@ export class AgentInvoker {
         ...(opts.onOutput ? { onOutput: opts.onOutput } : {}),
       });
 
-      let text = '';
+      let answerFile: string | undefined;
       try {
-        text = readFileSync(lastMessagePath, 'utf8').trim();
+        answerFile = readFileSync(lastMessagePath, 'utf8');
       } catch {
-        text = res.stdout.trim();
+        // No file at all: the outcome falls back to stdout, which carries no
+        // evidence of having finished.
       }
 
-      const ok = res.code === 0 && !res.timedOut;
+      const outcome = codexOutcome({
+        answerFile,
+        stdout: res.stdout,
+        code: res.code,
+        timedOut: res.timedOut,
+        timeoutMs: this.agent.timeout_ms,
+        stderr: res.stderr,
+      });
+      const { text, ok, lingered } = outcome;
       return {
         text,
         ok,
@@ -518,13 +583,11 @@ export class AgentInvoker {
         commandLine: res.commandLine,
         ...(res.pid !== undefined ? { pid: res.pid } : {}),
         ...(res.lastOutputAt ? { lastOutputAt: res.lastOutputAt } : {}),
-        ...(ok
-          ? {}
-          : {
-              error: res.timedOut
-                ? `timed out after ${this.agent.timeout_ms}ms`
-                : `codex exited ${res.code}: ${res.stderr.trim().slice(-2000)}`,
-            }),
+        // Salvaged, never silently. The work stands, but a CLI that has to be
+        // killed every time is costing the whole timeout on every task, and
+        // that is a thing to go and fix rather than to absorb quietly.
+        ...(outcome.note ? { note: outcome.note } : {}),
+        ...(outcome.error ? { error: outcome.error } : {}),
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });

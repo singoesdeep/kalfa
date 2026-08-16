@@ -130,6 +130,8 @@ export type RunnerEvent =
       details?: ReviewFinding[];
     }
   | { type: 'second_opinion'; taskId: string; attempt: number }
+  /** Something went wrong that the attempt survived — see AgentRun.note. */
+  | { type: 'agent_note'; taskId: string; attempt: number; name: string; note: string }
   /** Findings git refuted, so they never reached the blocking decision. */
   | {
       type: 'claims_discarded';
@@ -366,6 +368,18 @@ export class Runner {
     const prefix = second ? 'review.second' : 'review';
     const started = Date.now();
 
+    /**
+     * The reviewer's streams, persisted as they arrive — the same treatment
+     * the builder already got.
+     *
+     * The asymmetry was not harmless. When a reviewer hung, its artifact
+     * directory held the request and nothing else, so "is it working or is it
+     * stuck?" had no answer anywhere in the repository. Diagnosing one meant
+     * reading the vendor's own session logs, outside Kalfa entirely.
+     */
+    const stdout = this.opts.artifacts?.sink(task.id, attempt, `${prefix}.stdout.log`);
+    const stderr = this.opts.artifacts?.sink(task.id, attempt, `${prefix}.stderr.log`);
+
     const result = await reviewTask({
       reviewer,
       task,
@@ -401,10 +415,22 @@ export class Runner {
             name: reviewer.label,
             command: commandLine,
             ...(pid !== undefined ? { pid } : {}),
+            ...(stdout ? { stdoutPath: stdout.path } : {}),
+            ...(stderr ? { stderrPath: stderr.path } : {}),
           });
+        },
+        onOutput: (stream, chunk) => {
+          (stream === 'stdout' ? stdout : stderr)?.write(chunk);
         },
       },
     });
+
+    // Sinks create their file on first write, as the builder's do, so a
+    // silent reviewer still leaves none — but a stuck one now leaves whatever
+    // it managed to say.
+    for (const ref of [stdout?.close(), stderr?.close()]) {
+      if (ref) evidence.push(ref.path);
+    }
 
     this.commandEnd({
       type: 'command_end',
@@ -414,7 +440,21 @@ export class Runner {
       name: reviewer.label,
       ok: !result.error,
       durationMs: Date.now() - started,
+      ...(stdout ? { stdoutPath: stdout.path } : {}),
+      ...(stderr ? { stderrPath: stderr.path } : {}),
     });
+
+    // A review that only arrived because Kalfa went and took it must say so.
+    if (result.note) {
+      this.emit({ type: 'agent_note', taskId: task.id, attempt, name: reviewer.label, note: result.note });
+      this.opts.journal.event('agent_note', {
+        taskId: task.id,
+        attempt,
+        phase: (second ? 'second_opinion' : 'review') satisfies Phase,
+        name: reviewer.label,
+        note: result.note,
+      });
+    }
 
     // Announced whatever the task goes on to do. The case that most needs
     // saying is the quiet one: a task that passes because the only blocker

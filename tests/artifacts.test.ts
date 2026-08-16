@@ -305,3 +305,67 @@ describe('the event stream', () => {
     expect(git(['status', '--porcelain'])).toBe('');
   });
 });
+
+/**
+ * The reviewer gets the same treatment as the builder.
+ *
+ * It did not, and the asymmetry cost a diagnosis: when a reviewer hung, its
+ * artifact directory held the request and nothing else, so "is it working or
+ * is it stuck?" had no answer anywhere in the repository. Finding out meant
+ * reading the vendor's own session logs, outside Kalfa entirely.
+ */
+describe('artifacts: the reviewer is as visible as the builder', () => {
+  /** A reviewer that prints as it goes, the way a real CLI does. */
+  const talkingReviewer = (text: string, chatter: string[], note?: string): AgentInvoker =>
+    ({
+      label: 'codex',
+      provider: 'codex',
+      invoke: async (_prompt: string, opts: { onOutput?: (s: 'stdout' | 'stderr', c: string) => void }) => {
+        for (const line of chatter) opts.onOutput?.('stdout', `${line}\n`);
+        return { ...ok(text), toolEventsSupported: false, ...(note ? { note } : {}) };
+      },
+    }) as unknown as AgentInvoker;
+
+  it('streams the reviewer\'s output to disk while it arrives', async () => {
+    const { runner } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, max_attempts: 1, review_second_opinion: false },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt')]),
+        reviewer: talkingReviewer('{"findings":[]}', ['reading the diff', 'checking the tests']),
+      },
+    );
+    await runner.run();
+
+    const log = readFileSync(
+      join(repo, '.kalfa/runs/testrun/artifacts/T1/1/review.stdout.log'),
+      'utf8',
+    );
+    expect(log).toContain('reading the diff');
+    expect(log).toContain('checking the tests');
+  });
+
+  it('reports a review that only arrived because Kalfa went and took it', async () => {
+    const note = 'codex produced its answer but did not exit; killed after 1000ms';
+    const { runner, events } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, max_attempts: 1, review_second_opinion: false },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt')]),
+        reviewer: talkingReviewer('{"findings":[]}', [], note),
+      },
+    );
+    await runner.run();
+
+    // The task passes on the salvaged review — and the salvage is on the record.
+    const emitted = events.find((e) => e.type === 'agent_note');
+    expect(emitted && emitted.type === 'agent_note' && emitted.note).toBe(note);
+    expect(readJournal().some((e) => e.type === 'agent_note')).toBe(true);
+  });
+});

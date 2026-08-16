@@ -174,6 +174,7 @@ export async function reviewTask(opts: ReviewOptions): Promise<ReviewResult> {
       costKnown: run.costKnown,
       durationMs: run.durationMs,
       error: run.error ?? 'reviewer failed',
+      ...(run.note ? { note: run.note } : {}),
       ...paths,
     };
   }
@@ -190,6 +191,7 @@ export async function reviewTask(opts: ReviewOptions): Promise<ReviewResult> {
       costKnown: run.costKnown,
       durationMs: run.durationMs,
       error: `reviewer returned unparseable output: ${run.text.slice(0, 500)}`,
+      ...(run.note ? { note: run.note } : {}),
       ...paths,
     };
   }
@@ -213,6 +215,7 @@ export async function reviewTask(opts: ReviewOptions): Promise<ReviewResult> {
     costUsd: run.costUsd,
     costKnown: run.costKnown,
     durationMs: run.durationMs,
+    ...(run.note ? { note: run.note } : {}),
     ...paths,
     ...(findingsPath ? { findingsPath } : {}),
   };

@@ -129,6 +129,11 @@ export function createRenderer(opts: RenderOptions): (event: RunnerEvent) => voi
         for (const line of formatDiscarded(event.findings)) write(`           ${line}\n`);
         break;
 
+      case 'agent_note':
+        write(`  ! ${event.name}: ${event.note}
+`);
+        break;
+
       case 'second_opinion':
         write(`  review   blocking — asking once more before discarding the work\n`);
         break;

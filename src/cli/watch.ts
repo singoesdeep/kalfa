@@ -304,6 +304,8 @@ export function describe(event: JournalEvent): string | undefined {
       const findings = (event['findings'] as unknown[]) ?? [];
       return `${where} review ${findings.length} finding(s) discarded — not supported by the diff`;
     }
+    case 'agent_note':
+      return `${where} ! ${field('name') ?? ''}: ${field('note') ?? ''}`;
     case 'retry_decision':
       return `${where} retrying${event['causedBy'] ? ` — evidence ${String(event['causedBy'])}/` : ''}`;
     case 'task_done':

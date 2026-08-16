@@ -62,6 +62,15 @@ export interface AgentRun {
   sessionId?: string;
   /** Non-zero exit or transport failure, as opposed to a task-level failure. */
   error?: string;
+  /**
+   * Something went wrong that the run survived anyway.
+   *
+   * Distinct from `error`, which means the run did not get what it needed. A
+   * note means it did, by a route worth knowing about — an agent that had to
+   * be killed after producing its answer costs the full timeout on every task
+   * it does that on, which is a thing to fix rather than to absorb quietly.
+   */
+  note?: string;
   /** The command line Kalfa actually spawned, for the operator to reproduce. */
   commandLine?: string;
   /** OS process id, so a live run can be inspected with the usual tools. */
@@ -163,6 +172,8 @@ export interface ReviewResult {
   durationMs: number;
   /** Set when the reviewer itself failed to run or returned unparseable output. */
   error?: string;
+  /** Set when the review succeeded by a route worth reporting — see AgentRun.note. */
+  note?: string;
   /** Repo-relative path to the reviewer's untruncated response. */
   rawPath?: string;
   /** Repo-relative path to the parsed findings, every severity included. */

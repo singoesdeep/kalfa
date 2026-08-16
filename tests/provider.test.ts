@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describeAbort, parseClaudeResult, quoteForCmd, runProcess } from '../src/agents/provider.js';
+import {
+  codexOutcome,
+  describeAbort,
+  parseClaudeResult,
+  quoteForCmd,
+  runProcess,
+} from '../src/agents/provider.js';
 
 /**
  * The exit code lies.
@@ -174,4 +180,63 @@ describe('runProcess: a lingering grandchild must not hold the run', () => {
     expect(result.timedOut).toBe(true);
     expect(Date.now() - started).toBeLessThan(15_000);
   }, 45_000);
+});
+
+/**
+ * An agent that answers and then will not leave.
+ *
+ * `codex exec --output-last-message` writes the final message when the task
+ * is done, which a live run showed is not the same event as the process
+ * exiting: the reviewer finished a minute in, wrote its findings, and stayed.
+ * Kalfa waited out the full 30-minute timeout and was about to block a task
+ * whose review had passed, with the review on disk the whole time.
+ */
+describe('codexOutcome', () => {
+  const base = { stdout: '', code: 0, timedOut: false, timeoutMs: 1000, stderr: '' };
+
+  it('prefers the written answer over stdout', () => {
+    const out = codexOutcome({ ...base, answerFile: '{"findings":[]}\n', stdout: 'noise' });
+    expect(out.text).toBe('{"findings":[]}');
+    expect(out.ok).toBe(true);
+  });
+
+  it('falls back to stdout when no answer file was written', () => {
+    expect(codexOutcome({ ...base, stdout: '  hello  ' }).text).toBe('hello');
+  });
+
+  it('accepts a timeout whose answer was already written, and says so', () => {
+    const out = codexOutcome({
+      ...base,
+      answerFile: '{"findings":[]}',
+      code: null,
+      timedOut: true,
+    });
+    expect(out.ok).toBe(true);
+    expect(out.lingered).toBe(true);
+    expect(out.error).toBeUndefined();
+    expect(out.note).toContain('did not exit');
+  });
+
+  // Without a file there is no evidence the agent finished anything, so a
+  // timeout is what it has always been: the review did not happen.
+  it('still fails a timeout that produced no answer', () => {
+    const out = codexOutcome({ ...base, code: null, timedOut: true, stdout: 'partial chatter' });
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain('timed out');
+    expect(out.note).toBeUndefined();
+  });
+
+  it('treats an empty answer file as no answer', () => {
+    const out = codexOutcome({ ...base, answerFile: '   \n', code: null, timedOut: true });
+    expect(out.ok).toBe(false);
+  });
+
+  // Narrow on purpose: only a lingering process is forgiven. A non-zero exit
+  // is a different claim about what happened and there is no evidence for
+  // treating it as fine.
+  it('does not forgive a non-zero exit just because a file exists', () => {
+    const out = codexOutcome({ ...base, answerFile: '{"findings":[]}', code: 1, stderr: 'boom' });
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain('codex exited 1');
+  });
 });
