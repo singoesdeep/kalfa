@@ -129,3 +129,25 @@ describe('reviewPrompt', () => {
     expect(reviewPrompt(task, [])).toMatch(/empty[\s\S]*findings array is the correct answer/);
   });
 });
+
+/**
+ * Reproduced twice in live runs: asked to review a correct fix for a failing
+ * test, the reviewer reported as a blocker that the test file had been
+ * weakened — when git showed it untouched. One fabricated blocker is enough
+ * to burn a task's attempts and stash correct work.
+ */
+describe('reviewPrompt guards against fabricated cheating findings', () => {
+  it('requires the file to be confirmed present in the diff first', () => {
+    const prompt = reviewPrompt(task, []);
+    expect(prompt).toMatch(/git diff HEAD --name-only/);
+    expect(prompt).toMatch(/If it is not there, that file was NOT touched/);
+  });
+
+  it('requires the offending line to be quoted', () => {
+    expect(reviewPrompt(task, [])).toMatch(/Quote the offending line from the diff/);
+  });
+
+  it('states the cost of getting it wrong, not just the rule', () => {
+    expect(reviewPrompt(task, [])).toMatch(/fabricated\s+blocker throws away correct work/);
+  });
+});

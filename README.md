@@ -396,7 +396,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 124 tests, no API calls
+npm test         # 127 tests, no API calls
 npm run typecheck
 npm run build
 ```
