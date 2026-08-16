@@ -102,6 +102,23 @@ export class StateStore {
   }
 }
 
+/**
+ * Read the current run record without claiming it.
+ *
+ * `StateStore` discards state belonging to a different run id, which is right
+ * for writing and wrong for reading: `kalfa status` wants to report whatever
+ * run last touched this repository, whichever it was.
+ */
+export function readRunRecord(cwd: string, stateDir = '.kalfa'): RunRecord | undefined {
+  const path = join(cwd, stateDir, 'state.json');
+  if (!existsSync(path)) return undefined;
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as RunRecord;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Stable, sortable, human-typable run id derived from the clock. */
 export function makeRunId(now = new Date()): string {
   const pad = (n: number): string => String(n).padStart(2, '0');

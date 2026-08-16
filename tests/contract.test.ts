@@ -20,8 +20,8 @@ describe('autonomy contract', () => {
   });
 
   it('gives ambiguity a destination other than the human', () => {
-    expect(AUTONOMY_CONTRACT).toMatch(/DECISIONS\.md/);
-    expect(AUTONOMY_CONTRACT).toMatch(/Reversal cost/);
+    expect(AUTONOMY_CONTRACT).toMatch(/Architecture Decision Record/);
+    expect(AUTONOMY_CONTRACT).toMatch(/Writing the record IS the approval process/);
   });
 
   it('restricts blocking to irreversible actions, and says so explicitly', () => {
@@ -72,10 +72,16 @@ describe('continuity between tasks', () => {
     expect(prompt).toMatch(/git log/);
   });
 
-  it('points every task at DECISIONS.md as the record of prior assumptions', () => {
+  it('points every task at the ADR index, which stays small as records pile up', () => {
     const prompt = taskPrompt(task, [], []);
-    expect(prompt).toMatch(/Read DECISIONS\.md before you start/);
-    expect(prompt).toMatch(/supersedes/);
+    expect(prompt).toMatch(/Read .docs\/adr\/README\.md. before you start/);
+    expect(prompt).toMatch(/supersede it explicitly/);
+  });
+
+  it('carries the ADR instructions when given them', () => {
+    const prompt = taskPrompt(task, [], [], 'WRITE-ADR-HERE');
+    expect(prompt).toContain('## Recording decisions');
+    expect(prompt).toContain('WRITE-ADR-HERE');
   });
 });
 

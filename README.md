@@ -20,13 +20,13 @@ Kalfa makes the opposite trade:
 
 | | Interactive frameworks | Kalfa |
 |---|---|---|
-| Ambiguity | stops and asks you | assumes, logs to `DECISIONS.md`, continues |
+| Ambiguity | stops and asks you | assumes, files an ADR, continues |
 | Quality gate | your review | test/typecheck gates + a second vendor's model |
 | Your review | synchronous, per phase | asynchronous, once, in the morning |
 | Stops for | anything unclear | only irreversible actions |
 
-You still review everything. You just do it after, from a diff and a decision
-log, instead of during, one question at a time.
+You still review everything. You just do it after, from a diff and a set of
+decision records, instead of during, one question at a time.
 
 ## How it works
 
@@ -48,6 +48,77 @@ plan.json  ──►  for each task, in dependency order:
 Every branch of that loop ends in "keep going". Kalfa stops the whole run only
 for a cost ceiling, repeated blocks, or Ctrl-C.
 
+## The documents
+
+Kalfa keeps the artifacts a team would keep, because an unattended agent needs
+them for the same reason a new hire does — and it cannot ask.
+
+```
+docs/PRD.md        why we are building this, for whom, what success means
+  ↓
+docs/SPEC.md       what exactly gets built — behaviour, contracts, NON-GOALS
+  ↓
+kalfa.plan.json    how — ordered, dependency-aware tasks
+  ↓
+TASKS.md           where it got to          (regenerated every status change)
+docs/adr/          why each choice was made (one file per decision)
+BLOCKED.md         what needs a human
+```
+
+Each level is generated from the one above and is the input to the one below.
+`kalfa spec` writes the top two, `kalfa plan` writes the third, `kalfa run`
+produces the bottom row.
+
+**Non-goals earn their own mention.** The characteristic failure of an
+unattended agent is not doing too little, it is doing too much — adding
+caching nobody asked for, generalising a function used once. A written list of
+what is out of scope is the only thing the reviewer can hold a diff against.
+`kalfa spec` refuses to write a SPEC without one.
+
+### Decision records, not a decision log
+
+Every task is told to read the prior decisions before it starts. That makes a
+single append-only file the wrong shape: it costs more to read on every task,
+until eventually a task reads it partially or skips it — silently, and exactly
+on the long runs where the earlier context matters most.
+
+So each decision is its own file, `docs/adr/0007-use-a-token-bucket.md`, in
+the usual Context / Decision / Consequences / Alternatives form. Tasks read
+`docs/adr/README.md`, which is one line per decision and stays small, then
+open only the records that bear on their work.
+
+**Agents write the records; Kalfa regenerates the index** by scanning the
+directory after every task. Nothing depends on an agent remembering to update
+two files, and the index cannot drift from what is on disk.
+
+An accepted record is never edited to change its decision — a later record
+supersedes it and says so. The history of what was believed when is the point.
+
+### The board
+
+`TASKS.md` is rewritten on every status change, so a run killed at 3am still
+leaves an accurate board:
+
+```markdown
+2/5 done · 1 blocked · 2 pending · $3.4120
+
+| # | Task | Status | Attempts | Commit | Cost |
+|---|---|---|---|---|---|
+| 1 | `[x]` T1: Add a token-bucket limiter | done | 1 | `a1b2c3d4` | $0.4210 |
+| 2 | `[!]` T2: Wire it into the dispatcher | blocked | 3 | — | $1.8800 |
+| 3 | `[ ]` T3: Document the config keys | pending | 0 | — | — |
+
+## Needs you
+
+### T2: Wire it into the dispatcher
+- **Reason:** no attempt passed verification in 3 attempts
+- **Last attempt:** gate `test` failed
+- **Abandoned work:** parked in stash `deadbeef` — `git stash apply`
+```
+
+`kalfa status` prints the same thing to the terminal, and `--json` gives you
+the raw record. Watch a run from a second terminal with either.
+
 ## Memory, and why context never fills
 
 Every task runs in a **fresh session**. Nothing is resumed, nothing carries
@@ -62,14 +133,15 @@ The cost is that **each task is amnesiac**, so memory has to live on disk:
 | Artifact | Holds | Read by |
 |---|---|---|
 | git commits | the code, one commit per task | every later task |
-| `DECISIONS.md` | every assumption made instead of asking | every later task, and you |
+| `docs/adr/` | every decision made instead of asking, one file each | every later task, and you |
+| `TASKS.md` | the board: status, attempts, commits, cost | you, mid-run |
 | `BLOCKED.md` | what it would not do, and why | you |
 | `.kalfa/state.json` | task status, attempts, cost | `--run-id` resume |
 | `.kalfa/journal.jsonl` | every event, including each task's final report | you |
 | `kalfa.plan.json` | the plan | the run |
 
 So each task prompt hands over what the session cannot: which tasks already
-landed, an instruction to read `DECISIONS.md` first, and a pointer to
+landed, an instruction to read `docs/adr/README.md` first, and a pointer to
 `git log` for anything else. A retry is told to run `git diff HEAD` before
 touching anything — its own previous attempt is in the working tree, and that
 diff is the only record of it.
@@ -123,7 +195,8 @@ npm link            # optional: puts `kalfa` on your PATH
 ```bash
 cd your-project
 kalfa init                              # writes kalfa.yaml + a plan template
-kalfa plan "add rate limiting to the webhook dispatcher"
+kalfa spec "add rate limiting to the webhook dispatcher"   # PRD + SPEC
+kalfa plan                              # tasks, from the spec
 kalfa validate                          # checks config + plan, execution order
 kalfa run                               # go to bed
 ```
@@ -131,7 +204,9 @@ kalfa run                               # go to bed
 In the morning:
 
 ```bash
-cat DECISIONS.md           # every question it did not wake you up for
+kalfa status               # where it got to
+cat TASKS.md               # the board, with what needs you
+cat docs/adr/README.md     # every decision it made instead of asking
 cat BLOCKED.md             # what it refused to do, and why
 git log --oneline          # one commit per task
 kalfa run --run-id <id>    # resume: finished tasks are skipped
@@ -140,7 +215,9 @@ kalfa run --run-id <id>    # resume: finished tasks are skipped
 | Command | What it does |
 |---|---|
 | `kalfa init [--force]` | Write starter `kalfa.yaml` and `kalfa.plan.json` |
-| `kalfa plan "<goal>"` | Inspect the repo, ask its questions once, write a validated plan |
+| `kalfa spec "<goal>"` | Inspect the repo, ask its questions once, write `docs/PRD.md` + `docs/SPEC.md` |
+| `kalfa plan [goal]` | Write a validated plan. The goal is optional once a SPEC exists |
+| `kalfa status [--json]` | Where the current run got to. No API calls |
 | `kalfa plan --no-interview` | Generate straight from the goal, asking nothing |
 | `kalfa plan --print-prompt` | Print the planning prompt and exit. No API call |
 | `kalfa validate` | Check config and plan, print execution order. No API calls |
@@ -213,7 +290,7 @@ and every unattended run that follows.
 }
 ```
 
-**Vagueness here becomes an assumption in `DECISIONS.md`.** That is the deal —
+**Vagueness here becomes a decision an agent makes alone.** That is the deal —
 it is not a bug, but it does mean the quality of your morning is decided by the
 quality of your `details` and `acceptance` fields. Write acceptance criteria a
 test can assert, not ones a human must judge.
@@ -232,7 +309,7 @@ part that matters:
 > of this task.
 >
 > **On ambiguity:** pick the most conventional option consistent with the
-> surrounding codebase, then append to `DECISIONS.md` what you assumed, why,
+> surrounding codebase, then file an ADR recording what you assumed, why,
 > what you rejected, and how expensive it is to reverse. Recording the decision
 > IS the approval process.
 >
@@ -292,9 +369,12 @@ them reported without forcing a retry.
 - **Retry feedback is per-attempt, not cumulative.** Attempt 3 is told about
   attempt 2's failure, not attempt 1's. It can read the working tree to see
   what was tried, but nothing stops it oscillating between two wrong fixes.
-- **`DECISIONS.md` grows without bound, and every task is told to read it.** On
-  a long plan that is a real and rising context cost per task, and eventually
-  a task will read it partially or not at all. Split long runs.
+- **The ADR index still grows**, just far more slowly than a single log would.
+  On a very long plan it is still a rising per-task cost, and nothing prunes
+  or scopes it to the task at hand.
+- **Nothing verifies that an agent actually recorded its decisions.** The
+  contract requires it and the reviewer can notice its absence, but a task can
+  pass every gate having quietly assumed something and written nothing down.
 - **The reviewer sees the diff, not the plan's history.** It cannot tell you a
   task was solved in a way that will make task 7 impossible.
 - **An unparseable review blocks the task.** A reviewer that cannot be read is
@@ -309,7 +389,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 85 tests, no API calls
+npm test         # 116 tests, no API calls
 npm run typecheck
 npm run build
 ```

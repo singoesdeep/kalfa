@@ -173,7 +173,7 @@ describe('prompts', () => {
   });
 
   it('warns the planner that vagueness becomes an unattended assumption', () => {
-    expect(planPrompt('g', [])).toMatch(/DECISIONS\.md/);
+    expect(planPrompt('g', [])).toMatch(/files as an ADR/);
     expect(planPrompt('g', [])).toMatch(/CANNOT ask questions/);
   });
 
@@ -184,6 +184,18 @@ describe('prompts', () => {
     expect(prompt).toContain('Which store?');
     expect(prompt).toContain('postgres');
     expect(prompt).toContain('accepted your suggestion');
+  });
+
+  it('makes the spec authoritative over the goal line when one exists', () => {
+    const prompt = planPrompt('see the spec', [], undefined, '# Spec\n\n## Non-goals\n- no caching');
+    expect(prompt).toContain('## The specification');
+    expect(prompt).toContain('This is authoritative');
+    expect(prompt).toContain('no caching');
+    expect(prompt).toMatch(/respect its non-goals/);
+  });
+
+  it('omits the spec block entirely when there is no spec', () => {
+    expect(planPrompt('g', [])).not.toContain('## The specification');
   });
 
   it('quotes validation errors verbatim when repairing', () => {

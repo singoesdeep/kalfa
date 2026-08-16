@@ -99,8 +99,8 @@ describe('runner: the happy path', () => {
     expect(summary.counts.done).toBe(2);
     expect(summary.counts.blocked).toBe(0);
     expect(store.task('T1').commit).toBeTruthy();
-    // seed + kalfa bookkeeping + one commit per task
-    expect(git(['log', '--oneline']).split('\n')).toHaveLength(4);
+    // seed + begin-run + one commit per task + finish-run
+    expect(git(['log', '--oneline']).split('\n')).toHaveLength(5);
     expect(git(['status', '--porcelain'])).toBe('');
   });
 
@@ -109,7 +109,7 @@ describe('runner: the happy path', () => {
       builder: stubAgent([writes('a.txt')]),
     });
     await runner.run();
-    expect(git(['log', '-1', '--format=%B'])).toContain('kalfa-run: testrun');
+    expect(git(['log', '--format=%B'])).toContain('kalfa-run: testrun');
   });
 
   it('cuts a branch for the run', async () => {
@@ -180,9 +180,11 @@ describe('runner: failure handling', () => {
     // The abandoned work is stashed, not committed and not left in the tree.
     expect(git(['status', '--porcelain'])).toBe('');
     expect(git(['stash', 'list'])).toContain('blocked T1');
-    // The report survives the stash and is committed, not parked with the work.
+    // The report and the board survive the stash rather than being parked
+    // with the work they describe.
     expect(existsSync(join(repo, 'BLOCKED.md'))).toBe(true);
-    expect(git(['log', '-1', '--format=%s'])).toBe('kalfa: blocked T1');
+    expect(git(['log', '--format=%s'])).toContain('kalfa: blocked T1');
+    expect(readFileSync(join(repo, 'TASKS.md'), 'utf8')).toContain('blocked');
   });
 
   it('treats an empty diff as a failure rather than a silent pass', async () => {
@@ -319,6 +321,10 @@ describe('runner: resume', () => {
     await second.runner.run();
 
     expect(calls).toBe(0);
-    expect(git(['log', '--oneline']).split('\n')).toHaveLength(commitsAfterFirst);
+    // Only bookkeeping moved: the board's "finished" timestamp changed. No
+    // task was re-run, so no task commit was added.
+    const added = git(['log', '--oneline']).split('\n').length - commitsAfterFirst;
+    expect(added).toBeLessThanOrEqual(1);
+    expect(git(['log', '-1', '--format=%s'])).toMatch(/^kalfa: /);
   });
 });

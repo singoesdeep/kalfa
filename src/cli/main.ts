@@ -13,9 +13,11 @@ import {
   type Answer,
 } from '../plan/generate.js';
 import { ensureStateDir } from '../state/dir.js';
+import { generateSpec, readSpec, writeSpec, PRD_PATH, SPEC_PATH } from '../spec/spec.js';
+import { renderBoardPlain } from '../board/board.js';
 import { ConfigError, loadConfig, loadPlan } from '../config/load.js';
 import { Runner, type RunnerEvent } from '../runner/runner.js';
-import { StateStore, makeRunId } from '../state/store.js';
+import { StateStore, makeRunId, readRunRecord } from '../state/store.js';
 import { Journal } from '../journal/journal.js';
 import { topoOrder } from '../plan/schema.js';
 import { AUTONOMY_CONTRACT } from '../prompts/contract.js';
@@ -132,8 +134,173 @@ program
   });
 
 program
+  .command('status')
+  .description('Where the current run got to')
+  .option('-p, --plan <path>', 'plan file', 'kalfa.plan.json')
+  .option('--json', 'machine-readable output')
+  .action((opts: { plan: string; json?: boolean }) => {
+    const cwd = process.cwd();
+    const run = readRunRecord(cwd);
+    if (!run) fail('no run state found — nothing has been run in this repository yet');
+
+    if (opts.json) {
+      process.stdout.write(`${JSON.stringify(run, null, 2)}\n`);
+      return;
+    }
+
+    let plan;
+    try {
+      ({ plan } = loadPlan(cwd, opts.plan));
+    } catch {
+      fail(`run ${run.runId} exists but ${opts.plan} could not be read — pass --plan`);
+    }
+
+    const counts = { done: 0, blocked: 0, skipped: 0, running: 0, pending: 0 };
+    for (const task of plan.tasks) {
+      counts[run.tasks[task.id]?.status ?? 'pending'] += 1;
+    }
+    const cost = Object.values(run.tasks).reduce((sum, t) => sum + t.costUsd, 0);
+
+    process.stdout.write(`run ${run.runId}`);
+    if (run.branch) process.stdout.write(`  branch ${run.branch}`);
+    process.stdout.write(run.finishedAt ? `  finished\n` : `  in progress\n`);
+    process.stdout.write(`${plan.goal}\n\n`);
+    process.stdout.write(`${renderBoardPlain(plan, run)}\n\n`);
+    process.stdout.write(
+      `${counts.done}/${plan.tasks.length} done` +
+        (counts.blocked > 0 ? `, ${counts.blocked} blocked` : '') +
+        (counts.skipped > 0 ? `, ${counts.skipped} skipped` : '') +
+        `  ·  ${usd(cost)}\n`,
+    );
+    if (counts.blocked + counts.skipped + counts.pending > 0) {
+      process.stdout.write(`\nresume with: kalfa run --run-id ${run.runId}\n`);
+      process.stdout.write(`details in TASKS.md and BLOCKED.md\n`);
+    }
+  });
+
+program
+  .command('spec')
+  .argument('<goal>', 'what you want built, in a sentence or two')
+  .description('Write docs/PRD.md and docs/SPEC.md by inspecting this repository')
+  .option('-m, --model <model>', 'model for the planner')
+  .option('--no-interview', 'skip the questions')
+  .option('-q, --questions <n>', 'maximum questions to ask', '6')
+  .option('-f, --force', 'overwrite existing documents')
+  .action(async (goal: string, opts: SpecOptions) => {
+    const cwd = process.cwd();
+    if (!git.isRepo(cwd)) fail('not a git repository — spec from inside the repo you want built');
+
+    for (const rel of [PRD_PATH, SPEC_PATH]) {
+      if (existsSync(resolve(cwd, rel)) && !opts.force) {
+        fail(`${rel} already exists — pass --force to overwrite it`);
+      }
+    }
+
+    const planner = new AgentInvoker(plannerAgent(opts.model));
+    const controller = new AbortController();
+    process.once('SIGINT', () => controller.abort());
+
+    let costUsd = 0;
+    const answers = await runInterview(
+      planner,
+      goal,
+      cwd,
+      opts.interview,
+      Number(opts.questions) || 6,
+      controller.signal,
+      (spent) => (costUsd += spent),
+    );
+
+    process.stdout.write('writing the specification...\n');
+    try {
+      const result = await generateSpec(planner, {
+        goal,
+        cwd,
+        answers,
+        signal: controller.signal,
+        onAttempt: (attempt, problems) => {
+          if (attempt > 1) {
+            process.stdout.write(`  attempt ${attempt} — previous draft rejected:\n`);
+            for (const line of (problems ?? '').split('\n').slice(0, 4)) {
+              process.stdout.write(`    ${line}\n`);
+            }
+          }
+        },
+      });
+      costUsd += result.costUsd;
+      const written = writeSpec(cwd, result.docs);
+
+      process.stdout.write(`\nwrote ${written.prd} and ${written.spec} — ${usd(costUsd)}\n\n`);
+      process.stdout.write(
+        `Read SPEC.md, and pay attention to its Non-goals section — that is what\n` +
+          `stops an unattended agent building things nobody asked for.\n\n` +
+          `Then: kalfa plan\n`,
+      );
+    } catch (err) {
+      if (err instanceof PlanGenerationError) fail(err.message);
+      throw err;
+    }
+  });
+
+interface SpecOptions {
+  model?: string;
+  interview: boolean;
+  questions: string;
+  force?: boolean;
+}
+
+/**
+ * The single interactive moment, shared by `spec` and `plan`: every question
+ * at once, each with a default, then never again.
+ */
+async function runInterview(
+  planner: AgentInvoker,
+  goal: string,
+  cwd: string,
+  enabled: boolean,
+  maxQuestions: number,
+  signal: AbortSignal,
+  spend: (costUsd: number) => void,
+): Promise<Answer[]> {
+  if (!enabled) return [];
+
+  process.stdout.write('reading the repository...\n');
+  const asked = await askQuestions(planner, goal, cwd, maxQuestions, signal);
+  spend(asked.costUsd);
+
+  if (asked.questions.length === 0) {
+    process.stdout.write('no questions — the repository and goal were clear enough.\n\n');
+    return [];
+  }
+
+  process.stdout.write(
+    `\n${asked.questions.length} question${asked.questions.length === 1 ? '' : 's'}. ` +
+      `Press Enter to accept the suggested answer.\nThis is the only time you will be asked.\n\n`,
+  );
+
+  const answers: Answer[] = [];
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    for (const [i, q] of asked.questions.entries()) {
+      process.stdout.write(`${i + 1}. ${q.question}\n`);
+      if (q.why) process.stdout.write(`   why: ${q.why}\n`);
+      const reply = (await rl.question(`   [${q.suggested}] > `)).trim();
+      answers.push({
+        question: q.question,
+        answer: reply || q.suggested,
+        defaulted: reply.length === 0,
+      });
+      process.stdout.write('\n');
+    }
+  } finally {
+    rl.close();
+  }
+  return answers;
+}
+
+program
   .command('plan')
-  .argument('<goal>', 'what the whole run should accomplish, in one sentence')
+  .argument('[goal]', 'what the run should accomplish; optional once docs/SPEC.md exists')
   .description('Generate a validated kalfa.plan.json by inspecting this repository')
   .option('-o, --out <path>', 'where to write the plan', 'kalfa.plan.json')
   .option('-m, --model <model>', 'model for the planner')
@@ -141,12 +308,24 @@ program
   .option('-q, --questions <n>', 'maximum questions to ask', '6')
   .option('-f, --force', 'overwrite an existing plan file')
   .option('--print-prompt', 'print the planning prompt and exit — no API call')
-  .action(async (goal: string, opts: PlanOptions) => {
+  .action(async (goalArg: string | undefined, opts: PlanOptions) => {
     const cwd = process.cwd();
     const outPath = resolve(cwd, opts.out);
+    const spec = readSpec(cwd);
+
+    // With a spec on disk the goal line is optional: the spec is the real
+    // source of truth, and repeating it on the command line invites drift.
+    const goal = goalArg ?? (spec ? `See ${SPEC_PATH} — it is authoritative.` : undefined);
+    if (!goal) {
+      fail(
+        `no goal given and no ${SPEC_PATH} to plan from.\n` +
+          `  write one:  kalfa spec "<what you want built>"\n` +
+          `  or pass a goal:  kalfa plan "<goal>"`,
+      );
+    }
 
     if (opts.printPrompt) {
-      process.stdout.write(`${planPrompt(goal, [])}\n`);
+      process.stdout.write(`${planPrompt(goal, [], undefined, spec)}\n`);
       return;
     }
     if (existsSync(outPath) && !opts.force) {
@@ -159,46 +338,19 @@ program
     process.once('SIGINT', () => controller.abort());
 
     let costUsd = 0;
-    const answers: Answer[] = [];
+    if (spec) process.stdout.write(`planning from ${SPEC_PATH}\n`);
 
-    if (opts.interview) {
-      process.stdout.write('reading the repository...\n');
-      const asked = await askQuestions(
-        planner,
-        goal,
-        cwd,
-        Number(opts.questions) || 6,
-        controller.signal,
-      );
-      costUsd += asked.costUsd;
-
-      if (asked.questions.length === 0) {
-        process.stdout.write('no questions — the repository and goal were clear enough.\n\n');
-      } else {
-        // Every question at once, in one sitting. This is the only time Kalfa
-        // will ask you anything; after this the run is unattended.
-        process.stdout.write(
-          `\n${asked.questions.length} question${asked.questions.length === 1 ? '' : 's'}. ` +
-            `Press Enter to accept the suggested answer.\nThis is the only time you will be asked.\n\n`,
-        );
-        const rl = createInterface({ input: process.stdin, output: process.stdout });
-        try {
-          for (const [i, q] of asked.questions.entries()) {
-            process.stdout.write(`${i + 1}. ${q.question}\n`);
-            if (q.why) process.stdout.write(`   why: ${q.why}\n`);
-            const reply = (await rl.question(`   [${q.suggested}] > `)).trim();
-            answers.push({
-              question: q.question,
-              answer: reply || q.suggested,
-              defaulted: reply.length === 0,
-            });
-            process.stdout.write('\n');
-          }
-        } finally {
-          rl.close();
-        }
-      }
-    }
+    // A spec has already been through the interview; asking again is asking
+    // twice for the same information.
+    const answers = await runInterview(
+      planner,
+      goal,
+      cwd,
+      opts.interview && !spec,
+      Number(opts.questions) || 6,
+      controller.signal,
+      (spent) => (costUsd += spent),
+    );
 
     process.stdout.write('writing the plan...\n');
     try {
@@ -206,6 +358,7 @@ program
         goal,
         cwd,
         answers,
+        ...(spec ? { spec } : {}),
         signal: controller.signal,
         onAttempt: (attempt, errors) => {
           if (attempt > 1) {
@@ -227,7 +380,7 @@ program
       }
       process.stdout.write(
         `\nRead it before running. Every vague \`details\` field becomes an\n` +
-          `assumption in DECISIONS.md that nobody will be awake to catch.\n` +
+          `assumption recorded as an ADR that nobody will be awake to catch.\n` +
           `Then: kalfa run\n`,
       );
     } catch (err) {
@@ -320,7 +473,7 @@ program
     if (counts.blocked > 0 || counts.skipped > 0) {
       process.stdout.write(`read BLOCKED.md for what needs you\n`);
     }
-    process.stdout.write(`read DECISIONS.md for what it assumed instead of asking\n`);
+    process.stdout.write(`read docs/adr/README.md for what it decided instead of asking\n`);
     if (counts.blocked > 0 || counts.skipped > 0) {
       process.stdout.write(`resume with: kalfa run --run-id ${runId}\n`);
       process.exitCode = 2;

@@ -7,6 +7,8 @@ import { formatFindings, reviewTask } from '../review/review.js';
 import { AUTONOMY_CONTRACT, retryPrompt, taskPrompt } from '../prompts/contract.js';
 import { Journal } from '../journal/journal.js';
 import { StateStore } from '../state/store.js';
+import { writeBoard } from '../board/board.js';
+import { adrInstructions, nextAdrNumber, refreshAdrIndex } from '../adr/adr.js';
 import * as git from '../git/git.js';
 import type { AttemptRecord, Feedback, GateResult, TaskStatus } from '../types.js';
 
@@ -92,7 +94,10 @@ export class Runner {
     const baseCommit = git.headSha(cwd);
     const branch = this.setupBranch();
     store.setRunMeta({ baseCommit, ...(branch ? { branch } : {}) });
-    journal.ensureDecisionLog();
+    // Scaffold the decision record directory and its index before any task
+    // runs, so the first worker has somewhere to write and something to read.
+    refreshAdrIndex(cwd);
+    this.refreshBoard();
     // Land Kalfa's own bookkeeping in its own commit, so the first task starts
     // from a clean tree and no worker's diff is polluted by it.
     this.commitBookkeeping(`kalfa: begin run ${this.opts.runId}`);
@@ -124,6 +129,7 @@ export class Runner {
       if (unmet.length > 0) {
         const reason = `dependencies not satisfied: ${unmet.join(', ')}`;
         store.setStatus(task.id, 'skipped', { reason });
+        this.refreshBoard();
         journal.event('task_skipped', { taskId: task.id, reason });
         journal.recordBlocked(task.id, task.title, reason);
         this.commitBookkeeping(`kalfa: skipped ${task.id}`);
@@ -148,6 +154,10 @@ export class Runner {
     const counts = store.counts();
     const costUsd = store.totalCostUsd();
     store.setRunMeta({ finishedAt: new Date().toISOString() });
+    this.refreshBoard();
+    // Without this the final board is left uncommitted, and the NEXT run
+    // refuses to start on a dirty tree.
+    this.commitBookkeeping(`kalfa: finish run ${this.opts.runId}`);
     journal.event('run_end', { counts, costUsd, stoppedEarly });
     this.emit({ type: 'run_end', counts, costUsd });
 
@@ -158,6 +168,14 @@ export class Runner {
       baseCommit,
       ...(stoppedEarly ? { stoppedEarly } : {}),
     };
+  }
+
+  /**
+   * Re-render TASKS.md. Called after every status change so a run killed
+   * mid-task still leaves an accurate board on disk.
+   */
+  private refreshBoard(): void {
+    writeBoard(this.opts.cwd, this.opts.plan, this.opts.store.run);
   }
 
   /**
@@ -172,7 +190,7 @@ export class Runner {
   }
 
   /**
-   * Commit Kalfa's own artifacts (DECISIONS.md, BLOCKED.md) separately from
+   * Commit Kalfa's own artifacts (TASKS.md, the ADR index, BLOCKED.md) apart from
    * any task. Keeps the report in history and the tree clean between tasks.
    */
   private commitBookkeeping(message: string): void {
@@ -199,6 +217,7 @@ export class Runner {
     const wantsReview = task.review ?? config.policy.review;
 
     store.setStatus(task.id, 'running');
+    this.refreshBoard();
     journal.event('task_start', { taskId: task.id, title: task.title });
 
     let feedback: Feedback[] = [];
@@ -217,7 +236,12 @@ export class Runner {
 
       const prompt =
         attempt === 1
-          ? taskPrompt(task, gateCommands, this.completedSoFar())
+          ? taskPrompt(
+              task,
+              gateCommands,
+              this.completedSoFar(),
+              adrInstructions(nextAdrNumber(cwd), task.id),
+            )
           : retryPrompt(task, attempt, feedback);
 
       const run = await this.builder.invoke(prompt, {
@@ -278,6 +302,10 @@ export class Runner {
         ];
         continue;
       }
+
+      // The worker may have written decision records. Re-index before the
+      // gates run, so a stale index never reaches the next task.
+      refreshAdrIndex(cwd);
 
       const gateResults = gates.length > 0 ? await runGates(gates, cwd, this.opts.signal) : [];
       this.emit({ type: 'gates_done', taskId: task.id, results: gateResults });
@@ -379,6 +407,7 @@ export class Runner {
 
     if (!config.policy.commit_per_task) {
       store.setStatus(task.id, 'done');
+      this.refreshBoard();
       journal.event('task_done', { taskId: task.id, attempt });
       this.emit({ type: 'task_done', taskId: task.id, status: 'done' });
       return 'done';
@@ -397,6 +426,7 @@ export class Runner {
 
     const commit = git.commitAll(cwd, message);
     store.setStatus(task.id, 'done', { ...(commit ? { commit } : {}) });
+    this.refreshBoard();
     journal.event('task_done', { taskId: task.id, attempt, commit });
     this.emit({ type: 'task_done', taskId: task.id, status: 'done', ...(commit ? { commit } : {}) });
     return 'done';
@@ -414,6 +444,9 @@ export class Runner {
       reason,
       ...(stashRef ? { stashRef } : {}),
     });
+    // After the stash, never before: `git stash push -u` would sweep the
+    // board away with the abandoned work, losing the record of the failure.
+    this.refreshBoard();
     journal.event('task_blocked', { taskId: task.id, reason, stashRef });
     journal.recordBlocked(
       task.id,

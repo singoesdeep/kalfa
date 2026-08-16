@@ -12,7 +12,7 @@ import { PlanSchema, type Plan } from './schema.js';
  * batch, once, and then never asks again. Same information, one sitting.
  *
  * Everything the interview fails to pin down does not become a later question.
- * It becomes an assumption in DECISIONS.md, by design.
+ * It becomes a decision record the agent writes alone, by design.
  */
 
 /** A read-only agent: it inspects the repository and must not modify it. */
@@ -53,7 +53,7 @@ const PLANNER_ROLE = `You are planning work for Kalfa, an unattended build runne
 
 Kalfa will execute your plan with no human present. Each task is handed to a
 coding agent that CANNOT ask questions: anything you leave vague becomes an
-assumption that agent makes alone, at 3am, and logs to DECISIONS.md. Your job
+assumption that agent makes alone, at 3am, and files as an ADR. Your job
 is to leave as little to assumption as possible.
 
 Tasks run ONE AT A TIME, in dependency order, each starting from the commit the
@@ -94,7 +94,18 @@ If the repository and goal are clear enough that you would not benefit from
 asking anything, reply {"questions":[]}. That is a good outcome, not a failure.`;
 }
 
-export function planPrompt(goal: string, answers: Answer[], repair?: string): string {
+export function planPrompt(
+  goal: string,
+  answers: Answer[],
+  repair?: string,
+  spec?: string,
+): string {
+  // A spec, when one exists, is the source of truth — the goal line is only a
+  // pointer into it. Non-goals in particular have to reach the planner: they
+  // are what stop it inventing tasks nobody asked for.
+  const specBlock = spec
+    ? `\n## The specification\nThis is authoritative. Plan to it, and to nothing beyond it —\nespecially respect its non-goals.\n\n${spec}\n`
+    : '';
   const context =
     answers.length > 0
       ? `\n## Answers you were given\n${answers
@@ -113,7 +124,7 @@ export function planPrompt(goal: string, answers: Answer[], repair?: string): st
 
 ## The goal
 ${goal}
-${context}${repairBlock}
+${specBlock}${context}${repairBlock}
 ## Your job right now
 Write the plan. Inspect the repository first if you have not already.
 
@@ -183,6 +194,8 @@ export interface GenerateOptions {
   goal: string;
   cwd: string;
   answers: Answer[];
+  /** The SPEC.md contents, when the project has one. Authoritative if present. */
+  spec?: string;
   /** Validation-repair attempts. A plan that never validates is not written. */
   maxAttempts?: number;
   signal?: AbortSignal;
@@ -240,7 +253,7 @@ export async function generatePlan(
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     opts.onAttempt?.(attempt, repair);
 
-    const run = await planner.invoke(planPrompt(opts.goal, opts.answers, repair), {
+    const run = await planner.invoke(planPrompt(opts.goal, opts.answers, repair, opts.spec), {
       cwd: opts.cwd,
       ...(opts.signal ? { signal: opts.signal } : {}),
     });

@@ -55,7 +55,7 @@ export const EXAMPLE_PLAN = `{
     {
       "id": "T1",
       "title": "A small, self-contained first task",
-      "details": "Everything the worker needs, written as if it has never seen this plan and cannot ask you anything. Name the files, the conventions, and the edge cases you care about. Vagueness here becomes an assumption in DECISIONS.md.",
+      "details": "Everything the worker needs, written as if it has never seen this plan and cannot ask you anything. Name the files, the conventions, and the edge cases you care about. Vagueness here becomes an assumption recorded as an ADR.",
       "deps": [],
       "files": ["src/example.ts"],
       "acceptance": [

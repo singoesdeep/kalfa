@@ -24,16 +24,11 @@ RULES
    question mark is a failure of this task.
 
 2. ON AMBIGUITY: pick the most conventional option that is consistent with the
-   surrounding codebase, then append an entry to DECISIONS.md (create it if
-   missing) in exactly this form:
+   surrounding codebase, record it as an Architecture Decision Record (the
+   format is given below), and continue working.
 
-   ## <task-id>: <one-line decision>
-   - **Assumed:** what you took to be true
-   - **Because:** the evidence in the repo that led you there
-   - **Alternative:** the option you rejected
-   - **Reversal cost:** trivial | moderate | expensive
-
-   Then continue working. Recording the decision IS the approval process.
+   Writing the record IS the approval process. It is not paperwork about the
+   work; for an ambiguous choice, it is part of the work.
 
 3. STOP ONLY FOR IRREVERSIBLE ACTIONS. Append to BLOCKED.md and end the task
    without doing it if, and only if, finishing requires one of:
@@ -46,7 +41,7 @@ RULES
    blockers. Rule 2 covers those.
 
 4. STAY IN SCOPE. Implement the task below and nothing else. Unrelated
-   improvements you notice go in DECISIONS.md as a note, not into the diff.
+   improvements you notice go in the task report as a note, not into the diff.
    A large unrelated diff will be rejected by review.
 
 5. LEAVE THE TREE GREEN. The verification commands listed below will be run
@@ -79,11 +74,11 @@ export function continuitySection(completed: Array<{ id: string; title: string }
     `this task depends on how one of them was implemented, read the code, or`,
     `\`git log --oneline\` for what landed.`,
     ``,
-    `**Read DECISIONS.md before you start.** It records the assumptions earlier`,
-    `tasks made instead of asking. Contradicting one silently is worse than the`,
-    `original ambiguity: follow what is written there, or, if it is genuinely`,
-    `wrong for this task, override it and log the override with the same format`,
-    `and a note saying which decision it supersedes.`,
+    `**Read \`docs/adr/README.md\` before you start.** It indexes the decisions`,
+    `earlier tasks made instead of asking, one line each. Open the records that`,
+    `bear on this task. Contradicting one silently is worse than the original`,
+    `ambiguity: follow what is written, or supersede it explicitly with a new`,
+    `record that names the one it replaces.`,
   ];
   return lines.join('\n');
 }
@@ -93,8 +88,10 @@ export function taskPrompt(
   task: Task,
   gateCommands: string[],
   completed: Array<{ id: string; title: string }> = [],
+  adrInstructions?: string,
 ): string {
   const parts: string[] = [`# Task ${task.id}: ${task.title}`, continuitySection(completed)];
+  if (adrInstructions) parts.push(`## Recording decisions\n\n${adrInstructions}`);
 
   if (task.details.trim()) parts.push(task.details.trim());
 
@@ -152,7 +149,7 @@ export function retryPrompt(task: Task, attempt: number, feedback: Feedback[]): 
     ...blocks,
     `Fix the causes above. Do not weaken or delete tests or checks to make them ` +
       `pass. If a check is genuinely wrong, fix the check and log why in ` +
-      `DECISIONS.md. The autonomy rules still apply: no questions.`,
+      `an ADR. The autonomy rules still apply: no questions.`,
   ].join('\n\n');
 }
 

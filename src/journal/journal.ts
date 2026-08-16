@@ -9,7 +9,7 @@ import { ensureStateDir } from '../state/dir.js';
  * asynchronous review. That only works if what happened overnight is legible
  * in five minutes. Three artifacts, each with one job:
  *
- *   DECISIONS.md      — every assumption the worker made instead of asking you
+ *   docs/adr/         — every decision the worker made instead of asking you
  *   BLOCKED.md        — what it refused to do, and why
  *   .kalfa/journal.jsonl — the machine-readable event log
  */
@@ -56,27 +56,6 @@ export class Journal {
           return [];
         }
       });
-  }
-
-  /**
-   * Kalfa appends the header; the worker appends its own entries per the
-   * autonomy contract. Seeding the file means the worker never has to decide
-   * where to put the first one.
-   */
-  ensureDecisionLog(): void {
-    const path = join(this.cwd, 'DECISIONS.md');
-    if (existsSync(path)) return;
-    writeFileSync(
-      path,
-      [
-        '# Decisions',
-        '',
-        'Assumptions Kalfa made instead of stopping to ask. Read these first —',
-        'each one is a question you would otherwise have been woken up for.',
-        '',
-      ].join('\n'),
-      'utf8',
-    );
   }
 
   /** Kalfa's own blocked entry. Workers append here too, per the contract. */

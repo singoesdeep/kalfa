@@ -1,0 +1,172 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { topoOrder, type Plan } from '../plan/schema.js';
+import type { RunRecord, TaskRecord, TaskStatus } from '../types.js';
+
+/**
+ * TASKS.md — the board.
+ *
+ * `.kalfa/state.json` already records everything, but it is JSON in a hidden
+ * directory: you cannot glance at it, it does not diff usefully, and no agent
+ * is going to read it. The board is the same information rendered for the two
+ * readers who actually need it mid-run — you, from another terminal, and the
+ * next task, which starts with no memory of the previous ones.
+ *
+ * It is bounded by design. The decision records grow without limit as a run
+ * proceeds; the board is always exactly one row per task, so handing it to a
+ * task costs the same on task 30 as on task 1.
+ *
+ * Written after every status change, so a run killed mid-task still leaves an
+ * accurate board behind.
+ */
+
+const MARKER: Record<TaskStatus, string> = {
+  done: 'x',
+  blocked: '!',
+  skipped: '-',
+  running: '~',
+  pending: ' ',
+};
+
+const LABEL: Record<TaskStatus, string> = {
+  done: 'done',
+  blocked: 'blocked',
+  skipped: 'skipped',
+  running: 'running',
+  pending: 'pending',
+};
+
+function usd(n: number): string {
+  return `$${n.toFixed(4)}`;
+}
+
+/** Last attempt's outcome, which is what you want to know about a failure. */
+function lastFailure(record: TaskRecord | undefined): string {
+  const last = record?.attempts[record.attempts.length - 1];
+  if (!last) return '';
+  switch (last.outcome) {
+    case 'gate_failed': {
+      const failed = last.gates.filter((g) => !g.ok && !g.skipped).map((g) => g.name);
+      return failed.length > 0 ? `gate \`${failed.join('`, `')}\` failed` : 'a gate failed';
+    }
+    case 'review_failed':
+      return last.blockingFindings > 0
+        ? `${last.blockingFindings} blocking review finding${last.blockingFindings === 1 ? '' : 's'}`
+        : 'the reviewer could not be read';
+    case 'agent_failed':
+      return 'the worker did not complete';
+    case 'passed':
+      return '';
+  }
+}
+
+export function renderBoard(plan: Plan, run: RunRecord): string {
+  const ordered = topoOrder(plan);
+  const counts: Record<TaskStatus, number> = {
+    done: 0,
+    blocked: 0,
+    skipped: 0,
+    running: 0,
+    pending: 0,
+  };
+  for (const task of ordered) {
+    counts[run.tasks[task.id]?.status ?? 'pending'] += 1;
+  }
+  const totalCost = Object.values(run.tasks).reduce((sum, t) => sum + t.costUsd, 0);
+
+  const summary = [
+    `${counts.done}/${ordered.length} done`,
+    counts.blocked > 0 ? `${counts.blocked} blocked` : '',
+    counts.skipped > 0 ? `${counts.skipped} skipped` : '',
+    counts.running > 0 ? `${counts.running} running` : '',
+    counts.pending > 0 ? `${counts.pending} pending` : '',
+    usd(totalCost),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  const lines: string[] = [
+    `# Tasks`,
+    ``,
+    `Written by Kalfa. Regenerated on every status change — edits here are lost.`,
+    ``,
+    `**Goal:** ${plan.goal}`,
+    ``,
+    `**Run:** \`${run.runId}\`${run.branch ? ` · branch \`${run.branch}\`` : ''} · started ${run.startedAt}`,
+    run.finishedAt ? `**Finished:** ${run.finishedAt}` : `**Status:** in progress`,
+    ``,
+    summary,
+    ``,
+    `| # | Task | Status | Attempts | Commit | Cost |`,
+    `|---|---|---|---|---|---|`,
+  ];
+
+  for (const [i, task] of ordered.entries()) {
+    const record = run.tasks[task.id];
+    const status = record?.status ?? 'pending';
+    lines.push(
+      `| ${i + 1} | \`[${MARKER[status]}]\` ${task.id}: ${task.title} ` +
+        `| ${LABEL[status]} ` +
+        `| ${record?.attempts.length ?? 0} ` +
+        `| ${record?.commit ? `\`${record.commit.slice(0, 8)}\`` : '—'} ` +
+        `| ${record ? usd(record.costUsd) : '—'} |`,
+    );
+  }
+
+  const stuck = ordered.filter((task) => {
+    const status = run.tasks[task.id]?.status;
+    return status === 'blocked' || status === 'skipped';
+  });
+
+  if (stuck.length > 0) {
+    lines.push(``, `## Needs you`, ``);
+    for (const task of stuck) {
+      const record = run.tasks[task.id]!;
+      lines.push(`### ${task.id}: ${task.title}`, ``);
+      lines.push(`- **Status:** ${LABEL[record.status]}`);
+      if (record.reason) lines.push(`- **Reason:** ${record.reason}`);
+      const failure = lastFailure(record);
+      if (failure) lines.push(`- **Last attempt:** ${failure}`);
+      if (record.stashRef) {
+        lines.push(
+          `- **Abandoned work:** parked in stash \`${record.stashRef.slice(0, 8)}\` — ` +
+            `\`git stash list\` to find it, \`git stash apply\` to bring it back`,
+        );
+      }
+      lines.push(``);
+    }
+  }
+
+  const resumable = counts.pending > 0 || counts.blocked > 0 || counts.skipped > 0;
+  lines.push(
+    `## Next`,
+    ``,
+    ...(resumable
+      ? [
+          `- \`kalfa run --run-id ${run.runId}\` — retry what is unfinished; done tasks are skipped`,
+          `- Fix the plan first if a task blocked because it was wrong, not because it was hard`,
+        ]
+      : [`- Nothing outstanding. Review the diff: \`git log --oneline\`, \`docs/adr/\`.`]),
+    ``,
+  );
+
+  return lines.join('\n');
+}
+
+export function writeBoard(cwd: string, plan: Plan, run: RunRecord): void {
+  writeFileSync(join(cwd, 'TASKS.md'), renderBoard(plan, run), 'utf8');
+}
+
+/** One line per task, for the terminal. Same data, no markdown. */
+export function renderBoardPlain(plan: Plan, run: RunRecord): string {
+  const ordered = topoOrder(plan);
+  const width = Math.max(...ordered.map((t) => t.id.length));
+  const lines = ordered.map((task) => {
+    const record = run.tasks[task.id];
+    const status = record?.status ?? 'pending';
+    const attempts = record && record.attempts.length > 1 ? `  (${record.attempts.length} attempts)` : '';
+    const commit = record?.commit ? `  ${record.commit.slice(0, 8)}` : '';
+    return `  [${MARKER[status]}] ${task.id.padEnd(width)}  ${LABEL[status].padEnd(8)}${commit}${attempts}  ${task.title}`;
+  });
+  return lines.join('\n');
+}
