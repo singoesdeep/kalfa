@@ -245,39 +245,6 @@ by default) gets three things:
 Mechanical detection, human judgement. Set `protected_paths: []` to switch it
 off.
 
-## Is it ready?
-
-`kalfa doctor` answers that before you spend anything. It runs nothing of
-yours — no gates are executed, no prompts are sent, no money is spent — and
-every check in it exists because something actually went wrong here first:
-
-```
-  ok    git repo    /home/you/project
-  ok    commits     ed16ea7d on main
-  ok    clean tree  clean
-  ok    claude CLI  2.1.227 (Claude Code)
-  ok    codex CLI   codex-cli 0.146.0
-  ok    config      /home/you/project/kalfa.yaml
-                    builder   claude (sonnet)
-                    reviewer  codex
-                    gates     typecheck, test
-  ok    agents      no advisory warnings
-  ok    plan        4 tasks
-  ok    plan gates  all task gate references resolve
-  ok    gate check  npm  /usr/local/bin/npm
-
-10 ok
-
-ready — nothing here would stop `kalfa run`.
-```
-
-A failure carries its remedy on the next line rather than at the end of the
-report, and the command exits non-zero so it can gate a script.
-
-Most of `doctor` was written by Kalfa itself, unattended, from a spec that
-`kalfa spec` generated — including the Windows PATHEXT handling in its
-executable resolution, which is the sort of detail that gets skipped by hand.
-
 ## Requirements
 
 - Node 20+
@@ -335,6 +302,39 @@ kalfa run --run-id <id>    # resume: finished tasks are skipped
 | `kalfa run --new` | Start fresh even though an earlier run was interrupted |
 | `kalfa run --force` | Take the run lock even if another run appears to hold it |
 | `kalfa contract` | Print the autonomy contract handed to every agent |
+
+## Is it ready?
+
+`kalfa doctor` answers that before you spend anything. It runs nothing of
+yours — no gates are executed, no prompts are sent, no money is spent — and
+every check in it exists because something actually went wrong here first:
+
+```
+  ok    git repo    /home/you/project
+  ok    commits     ed16ea7d on main
+  ok    clean tree  clean
+  ok    claude CLI  2.1.227 (Claude Code)
+  ok    codex CLI   codex-cli 0.146.0
+  ok    config      /home/you/project/kalfa.yaml
+                    builder   claude (sonnet)
+                    reviewer  codex
+                    gates     typecheck, test
+  ok    agents      no advisory warnings
+  ok    plan        4 tasks
+  ok    plan gates  all task gate references resolve
+  ok    gate check  npm  /usr/local/bin/npm
+
+10 ok
+
+ready — nothing here would stop `kalfa run`.
+```
+
+A failure carries its remedy on the next line rather than at the end of the
+report, and the command exits non-zero so it can gate a script.
+
+Most of `doctor` was written by Kalfa itself, unattended, from a spec that
+`kalfa spec` generated — including the Windows PATHEXT handling in its
+executable resolution, which is the sort of detail that gets skipped by hand.
 
 ## Planning: the one sitting
 
