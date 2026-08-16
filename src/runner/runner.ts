@@ -293,6 +293,12 @@ export class Runner {
         attempt,
         max: config.policy.max_attempts,
       });
+      // Journalled on entry, not on completion. An attempt is only added to
+      // the task record once it finishes, so a run killed mid-builder used to
+      // leave no trace of it at all — the board showed a task with one fewer
+      // attempt than it had really made, and the interrupted work looked
+      // like it came from nowhere.
+      journal.event('attempt_start', { taskId: task.id, attempt, headBefore });
 
       if (attempt > 1 && feedback.length > 0) {
         // Without this a retry can appear in the log with no explanation at

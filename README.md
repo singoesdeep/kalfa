@@ -517,6 +517,14 @@ them reported without forcing a retry.
   no way for the builder to win an argument. When gates are green and only the
   review blocks, BLOCKED.md now records the finding, the worker'''s answer to
   it, and where the work is parked — so you can adjudicate rather than guess.
+- **An attempt is only counted once it finishes.** A run killed mid-builder
+  leaves that attempt out of the task's record, so the board can show one
+  fewer attempt than really happened. The journal records every attempt on
+  entry, so `.kalfa/journal.jsonl` has the truth even when the board does not.
+- **`max_attempts` resets on resume.** A task that had used two of three
+  attempts before an interruption gets three more. That is usually what you
+  want — you resumed for a reason — but it means the setting bounds a run
+  rather than a task.
 - **Nothing detects a genuine oscillation.** Every retry is now told what all
   its predecessors failed on — one line each, under `Already tried and
   failed` — so a worker can recognise a loop. Whether it acts on that is up to
@@ -556,7 +564,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 217 tests, no API calls
+npm test         # 220 tests, no API calls
 npm run typecheck
 npm run build
 ```
