@@ -6,6 +6,7 @@ import { quoteForCmd } from '../agents/provider.js';
 import { ConfigError, loadConfig, loadPlan } from '../config/load.js';
 import type { GateConfig, KalfaConfig, Provider } from '../config/schema.js';
 import type { Plan } from '../plan/schema.js';
+import { isStatePath } from '../state/dir.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
 
@@ -491,7 +492,11 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
       return { id: 'git-clean', label: 'clean tree', status: 'skip', detail: 'no commits yet' };
     }
     try {
-      const lines = git.statusLines(cwd);
+      // Kalfa's own state directory never counts against the user. It holds
+      // run state and the operator's redirected logs, and reporting those as
+      // "commit or stash first" sends someone to fix a problem they do not
+      // have — see the note on preflight in src/cli/main.ts.
+      const lines = git.statusLines(cwd).filter((line) => !isStatePath(line.slice(3).trim()));
       if (lines.length === 0) {
         return { id: 'git-clean', label: 'clean tree', status: 'ok', detail: 'clean' };
       }
