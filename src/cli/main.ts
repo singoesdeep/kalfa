@@ -24,7 +24,7 @@ import { StateStore, makeRunId, readRunRecord } from '../state/store.js';
 import { Journal } from '../journal/journal.js';
 import { topoOrder } from '../plan/schema.js';
 import { AUTONOMY_CONTRACT } from '../prompts/contract.js';
-import { EXAMPLE_CONFIG, EXAMPLE_PLAN } from '../config/templates.js';
+import { writeStarterFiles } from '../config/init.js';
 import * as git from '../git/git.js';
 
 const program = new Command();
@@ -71,24 +71,22 @@ function preflight(cwd: string, resuming = false): void {
 
 program
   .command('init')
-  .description('Write a starter kalfa.yaml and kalfa.plan.json')
+  .description('Write a starter kalfa.yaml, kalfa.plan.json, and the agent skill')
   .option('-f, --force', 'overwrite existing files')
   .action((opts: { force?: boolean }) => {
-    const cwd = process.cwd();
-    for (const [name, content] of [
-      ['kalfa.yaml', EXAMPLE_CONFIG],
-      ['kalfa.plan.json', EXAMPLE_PLAN],
-    ] as const) {
-      const path = resolve(cwd, name);
-      if (existsSync(path) && !opts.force) {
-        process.stdout.write(`skipped ${name} (exists — pass --force to overwrite)\n`);
-        continue;
-      }
-      writeFileSync(path, content, 'utf8');
-      process.stdout.write(`wrote ${name}\n`);
+    for (const file of writeStarterFiles(process.cwd(), opts.force)) {
+      process.stdout.write(
+        file.written
+          ? `wrote ${file.path}\n`
+          : `skipped ${file.path} (exists — pass --force to overwrite)\n`,
+      );
     }
     process.stdout.write(
-      '\nNext: edit kalfa.plan.json into real tasks, then `kalfa validate` and `kalfa run`.\n',
+      '\nThe SKILL.md files let Claude Code and Codex drive kalfa for you: ask either\n' +
+        'one to build something with kalfa and it will spec, plan and run it. Commit\n' +
+        'them, so a teammate’s agent finds them too.\n\n' +
+        'Next: edit kalfa.plan.json into real tasks, then `kalfa validate` and `kalfa run`.\n' +
+        'Or skip the hand-editing: `kalfa spec "<what you want built>"`.\n',
     );
   });
 

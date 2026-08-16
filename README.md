@@ -290,7 +290,7 @@ npm link            # optional: puts `kalfa` on your PATH
 ```bash
 cd your-project
 kalfa doctor                            # is this repo and machine ready?
-kalfa init                              # writes kalfa.yaml + a plan template
+kalfa init                              # kalfa.yaml, a plan template, the agent skill
 kalfa spec "add rate limiting to the webhook dispatcher"   # PRD + SPEC
 kalfa plan                              # tasks, from the spec
 kalfa validate                          # checks config + plan, execution order
@@ -311,7 +311,7 @@ kalfa run --run-id <id>    # resume: finished tasks are skipped
 | Command | What it does |
 |---|---|
 | `kalfa doctor` | Check this repo and machine are ready. Runs nothing, spends nothing |
-| `kalfa init [--force]` | Write starter `kalfa.yaml` and `kalfa.plan.json` |
+| `kalfa init [--force]` | Write starter `kalfa.yaml`, `kalfa.plan.json`, and the agent skill |
 | `kalfa spec "<goal>"` | Inspect the repo, ask its questions once, write `docs/PRD.md` + `docs/SPEC.md` |
 | `kalfa plan [goal]` | Write a validated plan. The goal is optional once a SPEC exists |
 | `kalfa status [--json]` | Where the current run got to. No API calls |
@@ -324,6 +324,37 @@ kalfa run --run-id <id>    # resume: finished tasks are skipped
 | `kalfa run --new` | Start fresh even though an earlier run was interrupted |
 | `kalfa run --force` | Take the run lock even if another run appears to hold it |
 | `kalfa contract` | Print the autonomy contract handed to every agent |
+
+## Driving it from Claude Code or Codex
+
+You do not have to type those commands. `kalfa init` also writes a skill:
+
+```
+.claude/skills/kalfa/SKILL.md     # Claude Code
+.agents/skills/kalfa/SKILL.md     # Codex CLI
+```
+
+Ask either agent to build something with kalfa and it takes the operator's
+seat: checks `doctor`, writes the spec, shows you the Non-goals and the plan's
+`details` fields, launches the run detached, and reads `TASKS.md`,
+`BLOCKED.md` and the ADRs back to you when it finishes.
+
+**The skill is per-project, not installed into your home directory.** A skill
+that offers an unattended build runner in a repository with no `kalfa.yaml`,
+no gates and no plan is worse than no skill. Commit the two files and a
+teammate's agent finds them too. Re-run `kalfa init` after upgrading kalfa to
+pick up a newer skill; it will not overwrite your `kalfa.yaml` without
+`--force`.
+
+The skill exists mostly to stop three things an agent otherwise does:
+
+- **triggering the interview.** `spec` and `plan` ask their questions on
+  stdin. No agent can answer that, so it hangs. The skill always passes
+  `--no-interview` and does the interview itself, in chat — which is a better
+  interview, because it can read your repository while asking.
+- **blocking on `kalfa run`.** A run outlives any agent's command timeout. The
+  skill launches it detached and polls `kalfa status --json`.
+- **writing the feature itself.** Which is the one thing it must not do.
 
 ## Is it ready?
 
