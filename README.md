@@ -754,7 +754,10 @@ notify:
   public.
 - **No quality measurement.** The gates prove the code compiles, passes tests
   and survives review. Nothing measures whether the result is *good*. That
-  judgement is still yours — which is what the morning diff is for.
+  judgement is still yours — which is what the morning diff is for. What can
+  be measured is how often each mechanism fires: `bench/` runs fixed scenarios
+  repeatedly and reports the rates, including the one number the claim check
+  depends on and no test can produce. See `bench/README.md`.
 - **The reviewer still produces false positives that nothing can settle.**
   The one class git can refute — a claim that this diff changed a file it did
   not touch — is now checked before a finding may block anything (see
@@ -832,10 +835,24 @@ notify:
 ## Development
 
 ```bash
-npm test         # 220 tests, no API calls
+npm test         # 364 tests, no API calls
 npm run typecheck
 npm run build
 ```
+
+Two things the unit suite cannot do, because both need the real CLIs:
+
+```bash
+node scripts/smoke.mjs 1     # does the plumbing work at all? staged, cheapest first
+node bench/run.mjs --dry-run # do the benchmark fixtures still hold? free
+node bench/run.mjs --repeat 5 --yes && node bench/report.mjs
+```
+
+`bench/` is the answer to *No quality measurement* below: fixed scenarios, run
+repeatedly, reported as rates. Today's bugs are the argument for it — a
+watcher that reported success over a running build, and an agent that hung a
+run indefinitely, both passed a green suite and were found by running the
+thing.
 
 The runner tests drive a real git repository in a temp directory with the
 agents stubbed. Git behaviour — commit per task, stash on failure, a clean tree

@@ -15,7 +15,9 @@
     "dev": "tsx src/cli/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench": "node bench/run.mjs",
+    "bench:report": "node bench/report.mjs"
   },
   "dependencies": {
     "commander": "^12.1.0",
