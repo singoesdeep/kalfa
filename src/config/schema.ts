@@ -114,6 +114,51 @@ export const PolicySchema = z
   })
   .strict();
 
+/**
+ * What a run writes down about itself.
+ *
+ * Kalfa's bargain is asynchronous review, and that only holds if a finished
+ * run — or a live one — can be interrogated. The defaults keep every piece of
+ * evidence a failure needs, and stop short of the one thing that is genuinely
+ * sensitive: the prompts, which embed task details and repository content.
+ */
+export const ObservabilitySchema = z
+  .object({
+    /** Persist per-attempt stdout/stderr, gate output and reviewer payloads. */
+    artifacts: z.boolean().default(true),
+    /**
+     * Also write each attempt's prompt to its artifact directory.
+     *
+     * Off by default. A prompt carries the task's details and whatever the
+     * planner learned about the repository, and artifacts are made to be
+     * pasted into issues.
+     */
+    capture_prompts: z.boolean().default(false),
+    /** Extra regular expressions masked out of everything Kalfa writes. */
+    redact_patterns: z.array(z.string()).default([]),
+  })
+  .strict();
+
+/**
+ * How the operator finds out the run needs them.
+ *
+ * Kalfa owns no integrations — no Slack, no email, no desktop toast. It runs
+ * one command and hands it a JSON payload on stdin, which is enough to build
+ * any of those in three lines and commits Kalfa to maintaining none of them.
+ */
+export const NotifySchema = z
+  .object({
+    /** Shell command receiving the payload on stdin. Nothing fires without it. */
+    command: z.string().min(1).optional(),
+    /** Which terminal states are worth a notification. */
+    on: z
+      .array(z.enum(['completed', 'blocked', 'failed']))
+      .default(['completed', 'blocked', 'failed']),
+    /** A hook that hangs must not hold the run open. */
+    timeout_ms: z.number().int().positive().default(30 * 1000),
+  })
+  .strict();
+
 export const ConfigSchema = z
   .object({
     agents: z
@@ -126,6 +171,8 @@ export const ConfigSchema = z
       .strict(),
     gates: z.array(GateSchema).default([]),
     policy: PolicySchema.default({}),
+    observability: ObservabilitySchema.default({}),
+    notify: NotifySchema.default({}),
   })
   .strict()
   .superRefine((config, ctx) => {
@@ -142,11 +189,26 @@ export const ConfigSchema = z
         message: 'policy.review is true but agents.reviewer is not configured',
       });
     }
+    // A redaction pattern that does not compile silently protects nothing, and
+    // the artifacts it was meant to scrub are written to disk anyway. Caught
+    // here, where a config mistake is free to fix.
+    for (const source of config.observability.redact_patterns) {
+      try {
+        new RegExp(source, 'g');
+      } catch (err) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `observability.redact_patterns: "${source}" is not a valid regular expression (${(err as Error).message})`,
+        });
+      }
+    }
   });
 
 export type AgentConfig = z.infer<typeof AgentSchema>;
 export type GateConfig = z.infer<typeof GateSchema>;
 export type PolicyConfig = z.infer<typeof PolicySchema>;
+export type ObservabilityConfig = z.infer<typeof ObservabilitySchema>;
+export type NotifyConfig = z.infer<typeof NotifySchema>;
 export type KalfaConfig = z.infer<typeof ConfigSchema>;
 
 export const SEVERITY_RANK: Record<'minor' | 'major' | 'blocker', number> = {

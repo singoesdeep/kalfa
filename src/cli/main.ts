@@ -12,14 +12,19 @@ import {
   PlanGenerationError,
   type Answer,
 } from '../plan/generate.js';
-import { ensureStateDir } from '../state/dir.js';
+import { ensureStateDir, isStatePath, repoRelative } from '../state/dir.js';
+import { ArtifactStore } from '../state/artifacts.js';
+import { Redactor } from '../state/redact.js';
 import { acquireLock, LockError } from '../state/lock.js';
+import { createRenderer } from './render.js';
+import { notify, type NotifyEvent, type NotifyPayload } from './notify.js';
+import { watchRun } from './watch.js';
 import { generateSpec, readSpec, writeSpec, PRD_PATH, SPEC_PATH } from '../spec/spec.js';
 import { renderBoardPlain } from '../board/board.js';
 import { runDoctor } from '../doctor/doctor.js';
 import { renderReport } from '../doctor/render.js';
 import { ConfigError, loadConfig, loadPlan } from '../config/load.js';
-import { Runner, type RunnerEvent } from '../runner/runner.js';
+import { Runner } from '../runner/runner.js';
 import { StateStore, makeRunId, readRunRecord } from '../state/store.js';
 import { Journal } from '../journal/journal.js';
 import { topoOrder } from '../plan/schema.js';
@@ -49,22 +54,42 @@ const usd = (n: number): string => `$${n.toFixed(4)}`;
  * that task's work in the tree by design — the retry prompt tells the worker
  * to go and read it — so refusing would strand the user at exactly the moment
  * resume exists for. It is reported rather than silently accepted.
+ *
+ * Kalfa's own state directory is claimed before the check, not after. The
+ * documented detached launch redirects stdout into `.kalfa/run.log`, which
+ * creates the directory — and its first two files — before Kalfa has ever run
+ * in that repository. A first real-project run died exactly there: `?? .kalfa/
+ * run.err`, reported as the user's uncommitted work, no task started. Kalfa's
+ * own operator logs are not the user's dirty tree, and it should never have
+ * been the operator's job to know that.
  */
-function preflight(cwd: string, resuming = false): void {
-  if (!git.isRepo(cwd)) fail('not a git repository — kalfa relies on git for commits and rollback');
-  if (!git.hasCommits(cwd)) fail('this repository has no commits yet — make an initial commit first');
-  if (git.isClean(cwd)) return;
+class PreflightError extends Error {}
 
-  const lines = git.statusLines(cwd).slice(0, 10);
+function preflight(cwd: string, resuming = false): void {
+  const refuse = (message: string): never => {
+    throw new PreflightError(message);
+  };
+  if (!git.isRepo(cwd)) refuse('not a git repository — kalfa relies on git for commits and rollback');
+  if (!git.hasCommits(cwd)) {
+    refuse('this repository has no commits yet — make an initial commit first');
+  }
+  ensureStateDir(cwd);
+
+  // Filtered as well as ignored. The gitignore handles every normal case; a
+  // `.kalfa/` path that was committed before the ignore file existed stays
+  // tracked forever, and that must not be able to strand a run either.
+  const lines = git.statusLines(cwd).filter((line) => !isStatePath(line.slice(3).trim()));
+  if (lines.length === 0) return;
+
   if (!resuming) {
-    fail(
+    refuse(
       `working tree is dirty — commit or stash first, so kalfa can tell its own work from yours:\n` +
-        lines.map((l) => `  ${l}`).join('\n'),
+        lines.slice(0, 10).map((l) => `  ${l}`).join('\n'),
     );
   }
   process.stdout.write(
     `resuming with uncommitted work in the tree — treating it as the interrupted task's:\n` +
-      lines.map((l) => `  ${l}\n`).join('') +
+      lines.slice(0, 10).map((l) => `  ${l}\n`).join('') +
       `\n`,
   );
 }
@@ -148,6 +173,22 @@ program
             `            the work but the reviewer. Add at least a typecheck and tests.\n`,
         );
       }
+      process.stdout.write(
+        `  evidence  ${
+          config.observability.artifacts
+            ? `per-attempt artifacts under .kalfa/runs/<run-id>/${
+                config.observability.capture_prompts ? ' (prompts captured)' : ''
+              }`
+            : '(off — a blocking finding will not be checkable against the diff it was about)'
+        }\n`,
+      );
+      process.stdout.write(
+        `  notify    ${
+          config.notify.command
+            ? `on ${config.notify.on.join(', ')} — ${config.notify.command.slice(0, 60)}`
+            : '(none — you will have to watch with `kalfa status --watch`)'
+        }\n`,
+      );
 
       process.stdout.write(`\nplan    ${planPath}\n`);
       process.stdout.write(`  goal      ${plan.goal}\n`);
@@ -181,6 +222,12 @@ program
     // CLI, a permission mode that silently cannot run tests, a dirty tree, a
     // gate command that is not on PATH. Cheap to run, and it runs nothing of
     // yours — no gates are executed, no prompts are sent, no money is spent.
+    //
+    // The state directory is claimed first, for the same reason `run` does it:
+    // doctor's clean-tree check would otherwise report Kalfa's own operator
+    // logs as the user's uncommitted work, and send them to fix nothing.
+    if (git.isRepo(process.cwd())) ensureStateDir(process.cwd());
+
     const report = await runDoctor({
       cwd: process.cwd(),
       ...(opts.config ? { configPath: opts.config } : {}),
@@ -200,8 +247,37 @@ program
   .description('Where the current run got to')
   .option('-p, --plan <path>', 'plan file', 'kalfa.plan.json')
   .option('--json', 'machine-readable output')
-  .action((opts: { plan: string; json?: boolean }) => {
+  .option(
+    '-w, --watch',
+    'follow the run until it finishes; exits 0 clean, 2 needs you, 3 the run died',
+  )
+  .option('--interval <ms>', 'how often --watch checks for new events', '1000')
+  .action(async (opts: { plan: string; json?: boolean; watch?: boolean; interval: string }) => {
     const cwd = process.cwd();
+
+    if (opts.watch) {
+      // Costs nothing and calls nothing: it reads local files and sleeps.
+      let plan;
+      try {
+        ({ plan } = loadPlan(cwd, opts.plan));
+      } catch {
+        // A board needs the plan; transitions do not. Watching without one is
+        // better than refusing to watch.
+      }
+      const controller = new AbortController();
+      process.once('SIGINT', () => controller.abort());
+      const code = await watchRun({
+        cwd,
+        ...(plan ? { plan } : {}),
+        json: Boolean(opts.json),
+        tty: Boolean(process.stdout.isTTY),
+        pollMs: Math.max(100, Number(opts.interval) || 1000),
+        signal: controller.signal,
+      });
+      process.exitCode = code;
+      return;
+    }
+
     const run = readRunRecord(cwd);
     if (!run) fail('no run state found — nothing has been run in this repository yet');
 
@@ -245,6 +321,12 @@ program
       for (const task of withTests) {
         process.stdout.write(`  ${task.id}  ${(run.tasks[task.id]?.protectedPaths ?? []).join(', ')}\n`);
       }
+    }
+    if (run.runDir) {
+      process.stdout.write(`\nfull evidence per attempt in ${run.runDir}/artifacts/\n`);
+    }
+    if (!run.finishedAt) {
+      process.stdout.write(`follow it with: kalfa status --watch\n`);
     }
     if (counts.blocked + counts.skipped + counts.pending > 0) {
       process.stdout.write(`\nresume with: kalfa run --run-id ${run.runId}\n`);
@@ -490,6 +572,9 @@ program
   .option('--dry-run', 'print the execution order and exit')
   .option('--force', 'take the run lock even if another run appears to hold it')
   .option('--new', 'start a fresh run even though an earlier one was interrupted')
+  .option('-v, --verbose', 'print every command, tool call and gate line as it happens')
+  .option('--jsonl', 'emit the structured event stream on stdout instead of prose')
+  .option('--no-artifacts', 'do not persist per-attempt stdout, gate output or reviews')
   .action(async (opts: {
     config?: string;
     plan: string;
@@ -497,6 +582,9 @@ program
     dryRun?: boolean;
     force?: boolean;
     new?: boolean;
+    verbose?: boolean;
+    jsonl?: boolean;
+    artifacts: boolean;
   }) => {
     const cwd = process.cwd();
     let config, plan, planPath;
@@ -535,9 +623,44 @@ program
       );
     }
 
-    preflight(cwd, resuming);
-
     const runId = opts.runId ?? makeRunId();
+
+    /**
+     * Refuse to start, and tell whoever is not watching.
+     *
+     * A run is launched detached and its operator is asleep. A failure before
+     * the first task is the case where silence costs the most: nothing is
+     * running, nothing ever will be, and the only signal is a line in a log
+     * file nobody is reading. This is the "run failed before task execution"
+     * notification, and it fires before the process exits.
+     */
+    const refuseToStart = async (message: string): Promise<never> => {
+      const warning = await notify(
+        config.notify,
+        {
+          event: 'failed',
+          runId,
+          goal: plan.goal,
+          error: message,
+          paths: {
+            tasks: 'TASKS.md',
+            blocked: 'BLOCKED.md',
+            journal: '.kalfa/journal.jsonl',
+            adrs: 'docs/adr/README.md',
+          },
+        },
+        cwd,
+      );
+      if (warning) process.stderr.write(`kalfa: ${warning}\n`);
+      return fail(message);
+    };
+
+    try {
+      preflight(cwd, resuming);
+    } catch (err) {
+      if (err instanceof PreflightError) await refuseToStart(err.message);
+      throw err;
+    }
 
     // One run per working tree. Two would interleave commits and clobber each
     // other's state, which is not a race to lose gracefully — it is data loss.
@@ -549,14 +672,17 @@ program
         ...(opts.force ? { force: true } : {}),
       });
     } catch (err) {
-      if (err instanceof LockError) fail(err.message);
+      if (err instanceof LockError) await refuseToStart(err.message);
       throw err;
     }
     const release = (): void => releaseLock();
     process.once('exit', release);
 
+    const redactor = new Redactor(config.observability.redact_patterns);
     const store = new StateStore(cwd, runId, planPath);
-    const journal = new Journal(cwd, runId);
+    const journal = new Journal(cwd, runId, '.kalfa', redactor);
+    const keepArtifacts = config.observability.artifacts && opts.artifacts !== false;
+    const artifacts = keepArtifacts ? new ArtifactStore(cwd, runId, redactor) : undefined;
 
     const controller = new AbortController();
     const onSignal = (): void => {
@@ -567,7 +693,17 @@ program
     process.once('SIGINT', onSignal);
 
     const startedAt = Date.now();
-    process.stdout.write(`kalfa run ${runId}\n${plan.goal}\n\n`);
+    if (!opts.jsonl) {
+      process.stdout.write(`kalfa run ${runId}\n${plan.goal}\n`);
+      process.stdout.write(
+        `events in ${repoRelative(cwd, journal.path)} · follow with: kalfa status --watch\n\n`,
+      );
+    }
+
+    const render = createRenderer({
+      verbose: Boolean(opts.verbose),
+      jsonl: Boolean(opts.jsonl),
+    });
 
     const runner = new Runner({
       cwd,
@@ -577,113 +713,83 @@ program
       runId,
       store,
       journal,
+      ...(artifacts ? { artifacts } : {}),
       signal: controller.signal,
-      onEvent: (event) => render(event),
+      onEvent: render,
     });
+
+    /** Terminal-state notification, fired once, on every way out of here. */
+    const announce = async (event: NotifyEvent, extra: Partial<NotifyPayload> = {}): Promise<void> => {
+      const warning = await notify(
+        config.notify,
+        {
+          event,
+          runId,
+          ...(store.run.branch ? { branch: store.run.branch } : {}),
+          goal: plan.goal,
+          counts: store.counts(),
+          costUsd: store.totalCostUsd(),
+          ...(store.run.costIncomplete ? { costIncomplete: true } : {}),
+          ...(store.run.stoppedEarly ? { stoppedEarly: store.run.stoppedEarly } : {}),
+          paths: {
+            tasks: 'TASKS.md',
+            blocked: 'BLOCKED.md',
+            journal: '.kalfa/journal.jsonl',
+            adrs: 'docs/adr/README.md',
+            ...(store.run.runDir ? { runDir: store.run.runDir } : {}),
+          },
+          ...extra,
+        },
+        cwd,
+      );
+      if (warning) process.stderr.write(`kalfa: ${warning}\n`);
+    };
 
     let summary;
     try {
       summary = await runner.run();
+    } catch (err) {
+      release();
+      // The run died mid-flight. Whoever is asleep still needs telling — that
+      // is the whole point of a notification hook, and a failure is the case
+      // where waiting for a message that never comes costs the most.
+      await announce('failed', { error: (err as Error).message });
+      throw err;
     } finally {
       release();
     }
     const { counts } = summary;
 
-    process.stdout.write(
+    const needsYou = counts.blocked > 0 || counts.skipped > 0;
+
+    // In --jsonl mode stdout belongs to the consumer; the human summary goes
+    // to stderr rather than corrupting the stream with prose.
+    const out = opts.jsonl
+      ? (text: string): void => void process.stderr.write(text)
+      : (text: string): void => void process.stdout.write(text);
+
+    out(
       `\n${counts.done} done, ${counts.blocked} blocked, ${counts.skipped} skipped` +
         `  ·  ${usd(summary.costUsd)}${store.run.costIncomplete ? '+' : ''}` +
         `  ·  ${seconds(Date.now() - startedAt)}\n`,
     );
     if (store.run.costIncomplete) {
-      process.stdout.write(
+      out(
         `cost shown is a FLOOR: the codex CLI does not report per-run spend, so the\n` +
           `reviewer's cost is missing — including from the max_run_cost_usd ceiling.\n`,
       );
     }
-    if (summary.branch) process.stdout.write(`branch ${summary.branch}\n`);
-    if (summary.stoppedEarly) process.stdout.write(`stopped early: ${summary.stoppedEarly}\n`);
-    if (counts.blocked > 0 || counts.skipped > 0) {
-      process.stdout.write(`read BLOCKED.md for what needs you\n`);
-    }
-    process.stdout.write(`read docs/adr/README.md for what it decided instead of asking\n`);
-    if (counts.blocked > 0 || counts.skipped > 0) {
-      process.stdout.write(`resume with: kalfa run --run-id ${runId}\n`);
+    if (summary.branch) out(`branch ${summary.branch}\n`);
+    if (summary.stoppedEarly) out(`stopped early: ${summary.stoppedEarly}\n`);
+    if (needsYou) out(`read BLOCKED.md for what needs you\n`);
+    out(`read docs/adr/README.md for what it decided instead of asking\n`);
+    if (artifacts) out(`every attempt's full evidence is in ${artifacts.rel(artifacts.dir)}/artifacts/\n`);
+    if (needsYou) {
+      out(`resume with: kalfa run --run-id ${runId}\n`);
       process.exitCode = 2;
     }
-  });
 
-function render(event: RunnerEvent): void {
-  switch (event.type) {
-    case 'run_start':
-      process.stdout.write(
-        `${event.total} tasks${event.branch ? ` on branch ${event.branch}` : ''}\n\n`,
-      );
-      break;
-    case 'task_start':
-      process.stdout.write(
-        `[${event.index + 1}/${event.total}] ${event.task.id}: ${event.task.title}\n`,
-      );
-      break;
-    case 'attempt_start':
-      if (event.attempt > 1) {
-        process.stdout.write(`  retry ${event.attempt}/${event.max}\n`);
-      }
-      break;
-    case 'agent_done':
-      process.stdout.write(
-        `  builder  ${event.ok ? 'ok' : 'FAILED'}  ${seconds(event.durationMs)}` +
-          `${event.costUsd > 0 ? `  ${usd(event.costUsd)}` : ''}\n`,
-      );
-      break;
-    case 'gates_done':
-      for (const gate of event.results) {
-        if (gate.skipped) continue;
-        process.stdout.write(
-          `  gate     ${gate.name.padEnd(10)} ${gate.ok ? 'pass' : 'FAIL'}  ${seconds(gate.durationMs)}\n`,
-        );
-      }
-      break;
-    case 'worker_committed':
-      process.stdout.write(
-        `  ! the worker committed its own work — undone so the gates and reviewer can see it
-`,
-      );
-      break;
-    case 'retrying':
-      process.stdout.write(`  cause    ${event.reason}
-`);
-      break;
-    case 'protected_touched':
-      process.stdout.write(
-        `  ! touched tests/checks: ${event.files.join(', ')} — flagged for review
-`,
-      );
-      break;
-    case 'second_opinion':
-      process.stdout.write(`  review   blocking — asking once more before discarding the work\n`);
-      break;
-    case 'review_done':
-      process.stdout.write(
-        event.error
-          ? `  review   ERROR  ${event.error.slice(0, 120)}\n`
-          : `  review   ${event.blocking > 0 ? `${event.blocking} blocking` : 'clean'}` +
-            ` (${event.findings} finding${event.findings === 1 ? '' : 's'})\n`,
-      );
-      break;
-    case 'task_done':
-      if (event.status === 'done') {
-        // On a resume this is the only line a finished task prints, so it has
-        // to name the task: a column of bare "-> done" tells you nothing.
-        process.stdout.write(
-          `  -> ${event.taskId} done${event.commit ? ` ${event.commit.slice(0, 8)}` : ''}\n\n`,
-        );
-      } else {
-        process.stdout.write(`  -> ${event.status.toUpperCase()}: ${event.reason ?? ''}\n\n`);
-      }
-      break;
-    case 'run_end':
-      break;
-  }
-}
+    await announce(needsYou ? 'blocked' : 'completed');
+  });
 
 program.parseAsync(process.argv).catch((err: Error) => fail(err.message));

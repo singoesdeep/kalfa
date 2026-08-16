@@ -170,7 +170,8 @@ The cost is that **each task is amnesiac**, so memory has to live on disk:
 | `TASKS.md` | the board: status, attempts, commits, cost | you, mid-run |
 | `BLOCKED.md` | what it would not do, and why | you |
 | `.kalfa/state.json` | task status, attempts, cost | `--run-id` resume |
-| `.kalfa/journal.jsonl` | every event, including each task's final report | you |
+| `.kalfa/journal.jsonl` | every event: phases, commands, decisions | you, `status --watch`, your tooling |
+| `.kalfa/runs/<id>/artifacts/` | per attempt: transcripts, gate output, diffs, findings | you, when a summary is not enough |
 | `kalfa.plan.json` | the plan | the run |
 
 So each task prompt hands over what the session cannot: which tasks already
@@ -315,6 +316,7 @@ kalfa run --run-id <id>    # resume: finished tasks are skipped
 | `kalfa spec "<goal>"` | Inspect the repo, ask its questions once, write `docs/PRD.md` + `docs/SPEC.md` |
 | `kalfa plan [goal]` | Write a validated plan. The goal is optional once a SPEC exists |
 | `kalfa status [--json]` | Where the current run got to. No API calls |
+| `kalfa status --watch` | Follow a running build until it ends, then exit with what happened |
 | `kalfa plan --no-interview` | Generate straight from the goal, asking nothing |
 | `kalfa plan --print-prompt` | Print the planning prompt and exit. No API call |
 | `kalfa validate` | Check config and plan, print execution order. No API calls |
@@ -323,7 +325,88 @@ kalfa run --run-id <id>    # resume: finished tasks are skipped
 | `kalfa run --run-id <id>` | Resume a run; tasks already `done` are skipped |
 | `kalfa run --new` | Start fresh even though an earlier run was interrupted |
 | `kalfa run --force` | Take the run lock even if another run appears to hold it |
+| `kalfa run --verbose` | Print every command, tool call and gate line as it happens |
+| `kalfa run --jsonl` | Emit the structured event stream on stdout; prose moves to stderr |
 | `kalfa contract` | Print the autonomy contract handed to every agent |
+
+## Watching a run you are not sitting in front of
+
+A run is launched detached and outlives the terminal that started it. Two ways
+to keep track, both of which read local files and spend nothing:
+
+```bash
+kalfa status --watch        # follow transitions, exit when the run ends
+kalfa status --watch --json # the same, as raw events, for tooling
+```
+
+The exit code is the report:
+
+| Code | Meaning |
+|---|---|
+| `0` | finished, every task done |
+| `2` | finished, but something is blocked or skipped |
+| `3` | the run stopped without finishing — killed, crashed, or rebooted |
+| `1` | there was nothing to watch |
+
+That last one matters more than it looks: a watcher that waits forever for an
+event that will never arrive is worse than no watcher.
+
+If you would rather be told than watch, give Kalfa one command:
+
+```yaml
+notify:
+  command: 'notify-send "kalfa: $KALFA_EVENT" "$KALFA_DONE done, $KALFA_BLOCKED blocked"'
+  on: [completed, blocked, failed]
+```
+
+It runs once, at the end, with the run summary as JSON on stdin and the
+headline numbers in `KALFA_*`. Kalfa deliberately ships no Slack client, no
+SMTP and no toast: one command and a JSON payload is enough to build any of
+them in three lines, and keeps Kalfa out of the business of maintaining them.
+The hook cannot change the run's outcome — it fires after the last commit, a
+failure is reported and never propagated, and it is killed if it hangs.
+
+### When a summary is not enough
+
+Every line a run prints is short, and each one names the file behind it. Under
+`.kalfa/runs/<run-id>/artifacts/<task>/<attempt>/`:
+
+| File | What it holds |
+|---|---|
+| `builder.stdout.log` | everything the worker's CLI printed, written as it arrived |
+| `builder.tools.jsonl` | every tool call it made — which file, which command |
+| `builder.report.md` | its final message |
+| `gates/<name>.stdout.log`, `.stderr.log` | each gate's full output, per stream, untrimmed |
+| `diff.patch`, `diff.stat.txt` | the diff the reviewer was actually shown |
+| `review.findings.json` | its complete findings, every severity, not just the blocking count |
+| `review.raw.txt` | its untruncated response — including when it could not be parsed |
+| `decision.json` | what the attempt concluded, why, and which files prove it |
+
+This is what makes a blocking finding checkable rather than merely reported. A
+reviewer once blocked a task claiming a test file had been modified when git
+showed it untouched; adjudicating that in the morning means having the diff it
+was looking at, not a paragraph about it.
+
+Streams are written synchronously as they arrive, so a builder that hangs or
+takes the process down with it still leaves everything it printed up to that
+moment on disk.
+
+Turn the whole thing off with `kalfa run --no-artifacts`, or
+`observability.artifacts: false`.
+
+### What is redacted
+
+Anything Kalfa writes — artifacts, the journal, `BLOCKED.md` — is filtered
+first: the values of this process's secret-looking environment variables
+(`*_TOKEN`, `*_KEY`, `*_SECRET`, …), the well-known credential shapes, and
+whatever you add to `observability.redact_patterns`. It is a safety net rather
+than a guarantee, and it is biased towards over-redacting.
+
+Prompts are **not** captured by default. They embed task details and whatever
+the planner learned about your repository, and artifacts are meant to be
+pasted into issues; set `observability.capture_prompts: true` to keep them.
+
+No hidden model reasoning is ever recorded.
 
 ## Driving it from Claude Code or Codex
 
@@ -528,6 +611,18 @@ a type error makes test output noise, and the worker is better served by one
 real error than a cascade. Mark slow or flaky checks `required: false` to have
 them reported without forcing a retry.
 
+```yaml
+observability:
+  artifacts: true             # per-attempt transcripts, gate output, diffs, findings
+  capture_prompts: false      # prompts embed repo content; opt in
+  redact_patterns: []         # extra regexes masked out of everything written
+
+notify:
+  command: null               # one shell command; run summary as JSON on stdin
+  on: [completed, blocked, failed]
+  timeout_ms: 30000
+```
+
 ## Known limitations
 
 - **Codex cost is not reported at all.** The `codex exec` CLI does not print
@@ -538,6 +633,16 @@ them reported without forcing a retry.
   against that floor, so real spend can exceed the ceiling you set.
 - **Tasks run one at a time.** Independent tasks could run in parallel; they
   don't yet. Wall-clock is the sum of the plan.
+- **Artifacts are never pruned.** A long run keeps every attempt's transcript,
+  gate output and diff under `.kalfa/runs/`, and nothing deletes them. They
+  are git-ignored, so they cost disk rather than history — but on a large plan
+  that is real disk. `kalfa run --no-artifacts` turns it off wholesale; there
+  is no retention policy in between.
+- **Redaction is a filter, not a guarantee.** It masks the values of
+  secret-looking environment variables and the well-known credential shapes,
+  chunk by chunk as output arrives — which means a secret split across a chunk
+  boundary can slip through. Read an artifact before you paste it somewhere
+  public.
 - **No quality measurement.** The gates prove the code compiles, passes tests
   and survives review. Nothing measures whether the result is *good*. That
   judgement is still yours — which is what the morning diff is for.
@@ -546,8 +651,16 @@ them reported without forcing a retry.
   when git showed it untouched, which cost the task both its attempts. A
   single reviewer opinion is treated as authoritative, with no second vote and
   no way for the builder to win an argument. When gates are green and only the
-  review blocks, BLOCKED.md now records the finding, the worker'''s answer to
-  it, and where the work is parked — so you can adjudicate rather than guess.
+  review blocks, BLOCKED.md records the finding, the worker'''s answer to it,
+  where the work is parked, and the attempt directory holding the reviewer'''s
+  complete response and the diff it was shown — so you can adjudicate against
+  the evidence rather than guess.
+- **Only the claude provider reports tool-level activity.** `claude -p` is run
+  with `--output-format stream-json`, so every tool call the builder makes is
+  an event you can watch. `codex exec` reports nothing comparable, so a codex
+  reviewer is a silent four minutes with only its command line, pid, stdout
+  artifact and last-output time to go on. Kalfa says so rather than leaving
+  the silence to be read as a hang.
 - **An attempt is only counted once it finishes.** A run killed mid-builder
   leaves that attempt out of the task's record, so the board can show one
   fewer attempt than really happened. The journal records every attempt on

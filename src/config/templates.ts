@@ -67,6 +67,30 @@ policy:
   stash_failed_work: true     # park abandoned work; recover with \`git stash list\`
   abort_after_consecutive_blocks: 3
   # max_run_cost_usd: 25.0    # hard ceiling for the whole run
+
+# What the run writes down about itself. Every attempt gets a directory under
+# .kalfa/runs/<run-id>/artifacts/<task>/<attempt>/ holding the builder's
+# transcript, each gate's stdout and stderr, the diff the reviewer saw, its
+# complete findings, and the decision that followed. That is what makes a
+# blocking finding checkable in the morning instead of merely reported.
+observability:
+  artifacts: true
+  # Prompts embed task details and whatever the planner learned about your
+  # repository, and artifacts are made to be pasted into issues. Opt in.
+  capture_prompts: false
+  # Values of secret-looking environment variables and the well-known
+  # credential shapes are masked already; add your own patterns here.
+  redact_patterns: []
+  #  - "acme_[A-Za-z0-9]{20,}"
+
+# How you find out the run needs you. Kalfa owns no integrations — it runs one
+# command and hands it the run summary as JSON on stdin, with KALFA_* in the
+# environment for the one-liner case.
+notify:
+  # command: 'notify-send "kalfa: $KALFA_EVENT" "$KALFA_DONE done, $KALFA_BLOCKED blocked"'
+  # command: 'curl -sS -X POST -H "content-type: application/json" -d @- "$SLACK_WEBHOOK"'
+  on: [completed, blocked, failed]
+  timeout_ms: 30000
 `;
 
 export const EXAMPLE_PLAN = `{
@@ -192,28 +216,56 @@ A run takes hours and will outlive your command timeout, so **launch it
 detached and poll**. Do not block on it.
 
 \`\`\`bash
-nohup kalfa run > .kalfa/run.log 2>&1 &
+mkdir -p .kalfa && nohup kalfa run > .kalfa/run.log 2>&1 &
 \`\`\`
 
 \`\`\`powershell
+New-Item -ItemType Directory -Force .kalfa | Out-Null
 Start-Process kalfa -ArgumentList 'run' -NoNewWindow \`
   -RedirectStandardOutput .kalfa\\run.log -RedirectStandardError .kalfa\\run.err
 \`\`\`
 
-Then watch with commands that cost nothing and make no API calls:
+\`.kalfa/\` is Kalfa's own state directory and it ignores itself from within, so
+these logs are invisible to git and never count against the clean-tree check.
+
+Then follow it with commands that cost nothing and make no API calls:
 
 \`\`\`bash
-kalfa status            # the board
+kalfa status --watch    # follow until it ends, then exit
+kalfa status            # the board, once
 kalfa status --json     # the raw record
-tail .kalfa/run.log
 \`\`\`
+
+\`--watch\` is the one to use: it prints each transition as it happens and exits
+when the run reaches a terminal state, so you do not have to guess a polling
+interval. Its exit code tells you what happened without parsing anything:
+
+| Code | Meaning |
+|---|---|
+| \`0\` | finished, every task done |
+| \`2\` | finished, but something is blocked or skipped — read \`BLOCKED.md\` |
+| \`3\` | the run stopped without finishing (killed, crashed, rebooted) — resume it |
+| \`1\` | there was nothing to watch |
+
+If the user wants to be told rather than to watch, set \`notify.command\` in
+\`kalfa.yaml\`. It runs one shell command at the end with the run summary as JSON
+on stdin and \`KALFA_EVENT\`/\`KALFA_BLOCKED\`/\`KALFA_RUN_DIR\` in the environment.
 
 Kalfa holds one lock per working tree. Never start a second run beside a live
 one, and do not reach for \`--force\` to take the lock unless the user confirms
 the other run is genuinely dead.
 
-Exit codes: \`0\` finished clean, \`2\` finished with blocked or skipped tasks,
-\`1\` something failed before the run started.
+Exit codes for \`kalfa run\`: \`0\` finished clean, \`2\` finished with blocked or
+skipped tasks, \`1\` something failed before the run started.
+
+### Watching in more detail
+
+- \`kalfa run --verbose\` prints every command, the builder's tool calls, and the
+  gates' output as it arrives. Use it when a run is behaving strangely.
+- \`kalfa run --jsonl\` puts the structured event stream on stdout instead of
+  prose, for a TUI or a CI log viewer. The human summary moves to stderr.
+- \`kalfa status --watch --json\` gives the same events for a run you did not
+  launch yourself.
 
 ## Reporting back
 
@@ -226,12 +278,27 @@ When it ends, read these and summarise. Do not paste them.
 | \`docs/adr/README.md\` | every decision it made instead of asking |
 | \`git log --oneline\` | one commit per task, on the run's branch |
 
+Every summary above is short on purpose, and each one names the file holding
+the long version. Those live under \`.kalfa/runs/<run-id>/artifacts/<task>/<attempt>/\`:
+
+| File | What it holds |
+|---|---|
+| \`builder.stdout.log\`, \`builder.tools.jsonl\` | what the worker's CLI printed, and every tool call it made |
+| \`gates/<name>.stdout.log\`, \`.stderr.log\` | each gate's full output, untrimmed |
+| \`diff.patch\`, \`diff.stat.txt\` | the diff the reviewer was actually shown |
+| \`review.findings.json\`, \`review.raw.txt\` | its complete findings, and its untruncated response |
+| \`decision.json\` | what the attempt concluded, why, and which files prove it |
+
+\`.kalfa/journal.jsonl\` is the append-only event stream behind all of it.
+
 Lead with what needs the user:
 
 1. **Blocked tasks.** State the reviewer's specific claim and whether you
-   verified it. A block is usually a real finding — the reviewer has caught
-   correctness bugs the gates could not see. It is also sometimes a wrong
-   *plan* rather than wrong code. Say which you think it is, and why.
+   verified it — open \`review.findings.json\` and \`diff.patch\` for that attempt
+   and check the claim against the diff rather than repeating it. A block is
+   usually a real finding: the reviewer has caught correctness bugs the gates
+   could not see. It is also sometimes a wrong *plan* rather than wrong code,
+   and occasionally simply false. Say which you think it is, and why.
 2. **Protected-path touches.** Any task that changed tests, specs or checks. A
    convincing rationale for weakening a test is exactly what a bad change looks
    like, so read those diffs and verify the argument rather than weighing it.
