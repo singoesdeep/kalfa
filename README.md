@@ -48,6 +48,44 @@ plan.json  ──►  for each task, in dependency order:
 Every branch of that loop ends in "keep going". Kalfa stops the whole run only
 for a cost ceiling, repeated blocks, or Ctrl-C.
 
+## Memory, and why context never fills
+
+Every task runs in a **fresh session**. Nothing is resumed, nothing carries
+over in conversation. Task 12 starts as empty as task 1.
+
+That is the point. A long run cannot exhaust its context window, because
+context is scoped to one task attempt rather than to the run. The unit that
+can overflow is a single task — and if one does, `max_turns` catches it.
+
+The cost is that **each task is amnesiac**, so memory has to live on disk:
+
+| Artifact | Holds | Read by |
+|---|---|---|
+| git commits | the code, one commit per task | every later task |
+| `DECISIONS.md` | every assumption made instead of asking | every later task, and you |
+| `BLOCKED.md` | what it would not do, and why | you |
+| `.kalfa/state.json` | task status, attempts, cost | `--run-id` resume |
+| `.kalfa/journal.jsonl` | every event, including each task's final report | you |
+| `kalfa.plan.json` | the plan | the run |
+
+So each task prompt hands over what the session cannot: which tasks already
+landed, an instruction to read `DECISIONS.md` first, and a pointer to
+`git log` for anything else. A retry is told to run `git diff HEAD` before
+touching anything — its own previous attempt is in the working tree, and that
+diff is the only record of it.
+
+**If a task runs out of turns or context, it is not treated as done.**
+`claude -p` exits zero when it aborts that way — the process succeeded, the
+task didn't — so Kalfa checks the result subtype, not the exit code. An
+aborted attempt is a failed attempt: it retries, and if it never finishes, the
+work is stashed rather than committed.
+
+To pick up an interrupted run:
+
+```bash
+kalfa run --run-id 20260816-031500    # completed tasks are skipped
+```
+
 ## Why two vendors
 
 The builder cannot grade its own homework — not because it lies, but because
@@ -251,8 +289,12 @@ them reported without forcing a retry.
 - **No quality measurement.** The gates prove the code compiles, passes tests
   and survives review. Nothing measures whether the result is *good*. That
   judgement is still yours — which is what the morning diff is for.
-- **Retry feedback is per-attempt, not cumulative.** Attempt 3 sees attempt 2's
-  failure, not attempt 1's. A worker can oscillate between two wrong fixes.
+- **Retry feedback is per-attempt, not cumulative.** Attempt 3 is told about
+  attempt 2's failure, not attempt 1's. It can read the working tree to see
+  what was tried, but nothing stops it oscillating between two wrong fixes.
+- **`DECISIONS.md` grows without bound, and every task is told to read it.** On
+  a long plan that is a real and rising context cost per task, and eventually
+  a task will read it partially or not at all. Split long runs.
 - **The reviewer sees the diff, not the plan's history.** It cannot tell you a
   task was solved in a way that will make task 7 impossible.
 - **An unparseable review blocks the task.** A reviewer that cannot be read is
@@ -267,7 +309,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 72 tests, no API calls
+npm test         # 85 tests, no API calls
 npm run typecheck
 npm run build
 ```

@@ -119,23 +119,60 @@ function argsForCodex(agent: AgentConfig, schemaPath?: string): string[] {
   return args;
 }
 
+export interface ClaudeResult {
+  text: string;
+  costUsd: number;
+  sessionId?: string;
+  /** SDK result subtype: 'success', 'error_max_turns', 'error_during_execution'. */
+  subtype: string;
+  /**
+   * True when the run did not complete its work — including running out of
+   * turns or context.
+   *
+   * This matters more than it looks. `claude -p` EXITS ZERO when it aborts
+   * this way: the process ran fine, the task did not. Judging success by exit
+   * code alone would mark a half-finished task complete, and if its gates
+   * happened to pass, commit the partial work as done.
+   */
+  aborted: boolean;
+}
+
 /** `claude -p --output-format json` returns one object with usage and cost. */
-function parseClaudeResult(stdout: string): { text: string; costUsd: number; sessionId?: string } {
+export function parseClaudeResult(stdout: string): ClaudeResult {
   try {
     const parsed = JSON.parse(stdout) as {
       result?: string;
       total_cost_usd?: number;
       session_id?: string;
       is_error?: boolean;
+      subtype?: string;
     };
+    const subtype = parsed.subtype ?? 'success';
     return {
       text: parsed.result ?? '',
       costUsd: parsed.total_cost_usd ?? 0,
       ...(parsed.session_id ? { sessionId: parsed.session_id } : {}),
+      subtype,
+      aborted: parsed.is_error === true || subtype !== 'success',
     };
   } catch {
     // Fall back to raw text rather than losing the worker's output entirely.
-    return { text: stdout.trim(), costUsd: 0 };
+    return { text: stdout.trim(), costUsd: 0, subtype: 'unparseable', aborted: false };
+  }
+}
+
+/** Turn an abort subtype into something the retry prompt can act on. */
+export function describeAbort(subtype: string): string {
+  switch (subtype) {
+    case 'error_max_turns':
+      return (
+        'the worker ran out of turns before finishing — its work is incomplete. ' +
+        'Either the task is too large for one task, or max_turns is too low.'
+      );
+    case 'error_during_execution':
+      return 'the worker hit an error partway through — its work is incomplete.';
+    default:
+      return `the worker ended with subtype "${subtype}" rather than completing.`;
   }
 }
 
@@ -171,7 +208,13 @@ export class AgentInvoker {
 
     const parsed = parseClaudeResult(res.stdout);
     const durationMs = Date.now() - started;
-    const ok = res.code === 0 && !res.timedOut;
+    const ok = res.code === 0 && !res.timedOut && !parsed.aborted;
+
+    const error = res.timedOut
+      ? `timed out after ${this.agent.timeout_ms}ms`
+      : parsed.aborted
+        ? describeAbort(parsed.subtype)
+        : `claude exited ${res.code}: ${res.stderr.trim().slice(-2000)}`;
 
     return {
       text: parsed.text,
@@ -179,13 +222,7 @@ export class AgentInvoker {
       costUsd: parsed.costUsd,
       durationMs,
       ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
-      ...(ok
-        ? {}
-        : {
-            error: res.timedOut
-              ? `timed out after ${this.agent.timeout_ms}ms`
-              : `claude exited ${res.code}: ${res.stderr.trim().slice(-2000)}`,
-          }),
+      ...(ok ? {} : { error }),
     };
   }
 

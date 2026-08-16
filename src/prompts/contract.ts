@@ -58,9 +58,43 @@ RULES
    which files, and any decision you logged. No questions, no offers of
    further help.`;
 
+/**
+ * What earlier tasks in this run already did.
+ *
+ * Every task runs in a FRESH session — nothing carries over in conversation.
+ * That is deliberate: context never accumulates, so it never fills, and task
+ * 12 is as sharp as task 1. The cost is that a task knows nothing about its
+ * predecessors unless told, so the durable artifacts have to stand in for
+ * memory. This block is that hand-off.
+ */
+export function continuitySection(completed: Array<{ id: string; title: string }>): string {
+  const lines = [
+    `## What has already happened in this run`,
+    completed.length === 0
+      ? `Nothing yet — this is the first task.`
+      : `These tasks are already committed. Their code is in the repository:\n` +
+        completed.map((t) => `- ${t.id}: ${t.title}`).join('\n'),
+    ``,
+    `You have NO memory of those tasks — each runs in a separate session. If`,
+    `this task depends on how one of them was implemented, read the code, or`,
+    `\`git log --oneline\` for what landed.`,
+    ``,
+    `**Read DECISIONS.md before you start.** It records the assumptions earlier`,
+    `tasks made instead of asking. Contradicting one silently is worse than the`,
+    `original ambiguity: follow what is written there, or, if it is genuinely`,
+    `wrong for this task, override it and log the override with the same format`,
+    `and a note saying which decision it supersedes.`,
+  ];
+  return lines.join('\n');
+}
+
 /** Rendered once per task, ahead of any retry feedback. */
-export function taskPrompt(task: Task, gateCommands: string[]): string {
-  const parts: string[] = [`# Task ${task.id}: ${task.title}`];
+export function taskPrompt(
+  task: Task,
+  gateCommands: string[],
+  completed: Array<{ id: string; title: string }> = [],
+): string {
+  const parts: string[] = [`# Task ${task.id}: ${task.title}`, continuitySection(completed)];
 
   if (task.details.trim()) parts.push(task.details.trim());
 
@@ -105,8 +139,16 @@ export function retryPrompt(task: Task, attempt: number, feedback: Feedback[]): 
 
   return [
     `# Task ${task.id}: ${task.title} — attempt ${attempt}`,
-    `Your previous attempt did not pass verification. The work is still in the ` +
-      `working tree; fix it in place rather than starting over.`,
+    // The retry runs in a fresh session, so the agent genuinely cannot recall
+    // what it tried. The working tree is the only record — point at it
+    // explicitly rather than letting it re-derive the task from scratch.
+    `A previous attempt at this task did not pass verification. You have NO ` +
+      `memory of it — it ran in a separate session — but its work is still in ` +
+      `the working tree.\n\n` +
+      `Run \`git diff HEAD\` and \`git status\` FIRST to see what was already ` +
+      `done. It may be complete but wrong, or it may have stopped halfway. ` +
+      `Fix it in place; do not start over, and do not redo work that is already ` +
+      `correct.`,
     ...blocks,
     `Fix the causes above. Do not weaken or delete tests or checks to make them ` +
       `pass. If a check is genuinely wrong, fix the check and log why in ` +

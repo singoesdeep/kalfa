@@ -161,6 +161,17 @@ export class Runner {
   }
 
   /**
+   * Tasks already committed in this run, in plan order. Titles only — the
+   * code itself is in the repository, and re-summarizing it into the prompt
+   * would be both expensive and a worse source than reading it.
+   */
+  private completedSoFar(): Array<{ id: string; title: string }> {
+    return topoOrder(this.opts.plan)
+      .filter((task) => this.opts.store.isDone(task.id))
+      .map((task) => ({ id: task.id, title: task.title }));
+  }
+
+  /**
    * Commit Kalfa's own artifacts (DECISIONS.md, BLOCKED.md) separately from
    * any task. Keeps the report in history and the tree clean between tasks.
    */
@@ -206,7 +217,7 @@ export class Runner {
 
       const prompt =
         attempt === 1
-          ? taskPrompt(task, gateCommands)
+          ? taskPrompt(task, gateCommands, this.completedSoFar())
           : retryPrompt(task, attempt, feedback);
 
       const run = await this.builder.invoke(prompt, {

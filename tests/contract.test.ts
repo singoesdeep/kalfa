@@ -47,6 +47,38 @@ describe('taskPrompt', () => {
   });
 });
 
+/**
+ * Continuity is the whole answer to "what happens when context fills": it
+ * never does, because nothing accumulates. The price is that each task is
+ * amnesiac, so the durable artifacts have to be handed over explicitly.
+ */
+describe('continuity between tasks', () => {
+  it('tells the first task it is the first', () => {
+    expect(taskPrompt(task, [], [])).toContain('this is the first task');
+  });
+
+  it('lists what already landed, so a task can find its predecessors', () => {
+    const prompt = taskPrompt(task, [], [
+      { id: 'T0', title: 'Add the config loader' },
+      { id: 'T1', title: 'Wire it into startup' },
+    ]);
+    expect(prompt).toContain('T0: Add the config loader');
+    expect(prompt).toContain('T1: Wire it into startup');
+  });
+
+  it('is explicit that the agent has no memory of them', () => {
+    const prompt = taskPrompt(task, [], [{ id: 'T0', title: 'earlier' }]);
+    expect(prompt).toMatch(/NO memory/);
+    expect(prompt).toMatch(/git log/);
+  });
+
+  it('points every task at DECISIONS.md as the record of prior assumptions', () => {
+    const prompt = taskPrompt(task, [], []);
+    expect(prompt).toMatch(/Read DECISIONS\.md before you start/);
+    expect(prompt).toMatch(/supersedes/);
+  });
+});
+
 describe('retryPrompt', () => {
   it('quotes failure output verbatim inside a fence', () => {
     const prompt = retryPrompt(task, 2, [
@@ -59,7 +91,15 @@ describe('retryPrompt', () => {
 
   it('tells the worker to fix in place rather than restart', () => {
     const prompt = retryPrompt(task, 2, [{ kind: 'agent', source: 'claude', detail: 'boom' }]);
-    expect(prompt).toMatch(/fix it in place/);
+    expect(prompt).toMatch(/fix it in place/i);
+    expect(prompt).toMatch(/do not start over/i);
+  });
+
+  it('points the amnesiac retry at the working tree, its only record', () => {
+    const prompt = retryPrompt(task, 2, [{ kind: 'gate', source: 'test', detail: 'x' }]);
+    expect(prompt).toMatch(/NO memory of it/);
+    expect(prompt).toMatch(/git diff HEAD/);
+    expect(prompt).toMatch(/stopped halfway/);
   });
 
   it('repeats the no-weakening rule where it is most likely to be broken', () => {
