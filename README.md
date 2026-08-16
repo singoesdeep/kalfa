@@ -97,27 +97,57 @@ supersedes it and says so. The history of what was believed when is the point.
 ### The board
 
 `TASKS.md` is rewritten on every status change, so a run killed at 3am still
-leaves an accurate board:
+leaves an accurate board. This is a real one, from a run that fixed a pricing
+bug and was asked to add a regression case:
 
 ```markdown
-2/5 done · 1 blocked · 2 pending · $3.4120
+# Tasks
+
+**Goal:** Fix the order total and cover the zero-quantity case
+
+**Run:** `20260816-054955` · branch `kalfa/20260816-054955`
+**Finished:** 2026-08-16T02:51:06.306Z
+
+1/1 done · $0.1609+
+
+> Costs are a FLOOR, not a total: the codex CLI does not report per-run
+> cost, so the reviewer's spend is missing from every figure here.
 
 | # | Task | Status | Attempts | Commit | Cost |
 |---|---|---|---|---|---|
-| 1 | `[x]` T1: Add a token-bucket limiter | done | 1 | `a1b2c3d4` | $0.4210 |
-| 2 | `[!]` T2: Wire it into the dispatcher | blocked | 3 | — | $1.8800 |
-| 3 | `[ ]` T3: Document the config keys | pending | 0 | — | — |
+| 1 | `[x]` T1: Fix the discount calculation and add a regression case | done | 1 | `0da41eeb` | $0.1609 |
 
-## Needs you
+## Tests and checks were modified
 
-### T2: Wire it into the dispatcher
-- **Reason:** no attempt passed verification in 3 attempts
-- **Last attempt:** gate `test` failed
-- **Abandoned work:** parked in stash `deadbeef` — `git stash apply`
+These tasks changed files that are supposed to be judging the work.
+That is sometimes right and sometimes how a bad change gets through.
+Read these diffs first.
+
+### T1: Fix the discount calculation and add a regression case
+
+- `check.mjs`
+
+`git show 0da41eeb`
 ```
 
-`kalfa status` prints the same thing to the terminal, and `--json` gives you
-the raw record. Watch a run from a second terminal with either.
+A blocked task also gets a **Needs you** section naming what stopped it, what
+the last attempt failed on, and the stash its abandoned work is parked in.
+
+`kalfa status` prints the same information to the terminal, and `--json` gives
+you the raw record. Either works from a second terminal while a run is going.
+
+```
+run 20260816-054955  branch kalfa/20260816-054955  finished
+Fix the order total and cover the zero-quantity case
+
+  [x] T1  done      0da41eeb  [tests modified]  Fix the discount calculation …
+
+1/1 done  ·  $0.1609+
+cost is a floor — codex does not report its spend
+
+1 task(s) modified tests or checks — read those diffs first:
+  T1  check.mjs
+```
 
 ## Memory, and why context never fills
 
