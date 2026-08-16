@@ -21,14 +21,20 @@ export function renderReport(report: DoctorReport): string {
   const width = Math.max(...report.checks.map((c) => c.label.length), 10);
   const lines: string[] = [];
 
+  const indent = ' '.repeat(width + 10);
+
   for (const check of report.checks) {
-    lines.push(
-      `  ${SYMBOL[check.status]}  ${check.label.padEnd(width)}  ${check.detail}`.trimEnd(),
-    );
-    for (const extra of check.lines ?? []) lines.push(`${' '.repeat(width + 10)}${extra}`);
+    // A detail can be multi-line — a config that failed validation lists every
+    // problem. Continuation lines are indented to the detail column; left
+    // alone they wrap back to the margin and read as separate checks.
+    const [first = '', ...rest] = check.detail.split('\n');
+    lines.push(`  ${SYMBOL[check.status]}  ${check.label.padEnd(width)}  ${first}`.trimEnd());
+    for (const line of rest) lines.push(`${indent}${line}`.trimEnd());
+
+    for (const extra of check.lines ?? []) lines.push(`${indent}${extra}`);
     // Remedies are indented under their check rather than collected at the
     // end: the thing you must do belongs next to the thing that is wrong.
-    if (check.remedy) lines.push(`${' '.repeat(width + 10)}→ ${check.remedy}`);
+    if (check.remedy) lines.push(`${indent}→ ${check.remedy}`);
   }
 
   const { counts } = report;

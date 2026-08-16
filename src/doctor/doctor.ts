@@ -340,13 +340,13 @@ function buildGateChecks(gate: GateConfig, cwd: string): Check[] {
   const resolved = resolveExecutable(token, cwd);
   const checks: Check[] = [];
   if (resolved) {
-    checks.push({ id, label, status: 'ok', detail: `${gate.name}  ${resolved}` });
+    checks.push({ id, label, status: 'ok', detail: resolved });
   } else if (gate.required) {
     checks.push({
       id,
       label,
       status: 'fail',
-      detail: `${gate.name}: \`${token}\` is not on PATH`,
+      detail: `\`${token}\` is not on PATH`,
       remedy:
         'install it, or fix the `run` command — an unrunnable required gate fails every attempt, ' +
         'and the runner blames the builder for it and burns every retry',
@@ -356,7 +356,7 @@ function buildGateChecks(gate: GateConfig, cwd: string): Check[] {
       id,
       label,
       status: 'warn',
-      detail: `${gate.name}: \`${token}\` is not on PATH`,
+      detail: `\`${token}\` is not on PATH`,
       remedy: 'this gate is not required, so a run continues without it',
     });
   }

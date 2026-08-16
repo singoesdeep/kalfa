@@ -60,3 +60,45 @@ describe('renderReport', () => {
     expect(repoLine.indexOf('/tmp/x')).toBe(cleanLine.indexOf('2 uncommitted'));
   });
 });
+
+/**
+ * Both defects were reported from a real run of the delivered feature: a
+ * config that fails validation lists every problem, and those continuation
+ * lines wrapped back to the margin where they read as separate checks.
+ */
+describe('renderReport: multi-line details', () => {
+  const multi: DoctorReport = {
+    ok: false,
+    checks: [
+      { id: 'git-repo', label: 'git repo', status: 'ok', detail: '/tmp/x' },
+      {
+        id: 'config',
+        label: 'config',
+        status: 'fail',
+        detail: 'kalfa.yaml is not valid:\n(root): review is true but no reviewer\ngates.0.run: required',
+        remedy: 'fix the fields listed above',
+      },
+    ],
+    counts: { ok: 1, warn: 0, fail: 1, skip: 0 },
+  };
+
+  it('indents continuation lines to the detail column', () => {
+    const lines = renderReport(multi).split('\n');
+    const head = lines.find((l) => l.includes('is not valid'))!;
+    const cont = lines.find((l) => l.includes('(root):'))!;
+    expect(cont.indexOf('(root):')).toBe(head.indexOf('kalfa.yaml'));
+  });
+
+  it('keeps every problem, not just the first', () => {
+    const text = renderReport(multi);
+    expect(text).toContain('(root): review is true but no reviewer');
+    expect(text).toContain('gates.0.run: required');
+  });
+
+  it('still puts the remedy after the whole detail', () => {
+    const lines = renderReport(multi).split('\n');
+    expect(lines.findIndex((l) => l.includes('→ fix the fields'))).toBeGreaterThan(
+      lines.findIndex((l) => l.includes('gates.0.run')),
+    );
+  });
+});
