@@ -35,6 +35,18 @@ export interface SpawnResult {
   timedOut: boolean;
 }
 
+/**
+ * Quote one argument for cmd.exe.
+ *
+ * Narrow by design: the arguments here are flags, model ids and paths that
+ * Kalfa itself constructs. Windows forbids `"` in filenames, and none of the
+ * flag values contain one, so wrapping in double quotes is sufficient. Prompts
+ * never travel this way — they go on stdin precisely to avoid this problem.
+ */
+export function quoteForCmd(arg: string): string {
+  return /[\s"^&|<>()%!]/.test(arg) ? `"${arg}"` : arg;
+}
+
 /** Thin promise wrapper over spawn, with a hard timeout and stdin prompt. */
 export function runProcess(
   command: string,
@@ -43,12 +55,26 @@ export function runProcess(
   opts: { cwd: string; timeoutMs: number; signal?: AbortSignal; onLine?: (line: string) => void },
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: opts.cwd,
-      // .cmd shims on Windows are not directly executable.
-      shell: process.platform === 'win32',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    // Windows needs a shell, because `claude` and `codex` are .cmd shims that
+    // spawn cannot execute directly. But passing an args array WITH a shell
+    // concatenates them unescaped — Node warns about it, and it is a real bug
+    // here: the temp path handed to `--output-schema` contains the username,
+    // so any user whose Windows account has a space in it would have had the
+    // reviewer fail with a mangled path. Building the command line ourselves
+    // puts the quoting under our control and silences the warning honestly,
+    // rather than by suppressing it.
+    const isWindows = process.platform === 'win32';
+    const child = isWindows
+      ? spawn([command, ...args.map(quoteForCmd)].join(' '), {
+          cwd: opts.cwd,
+          shell: true,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        })
+      : spawn(command, args, {
+          cwd: opts.cwd,
+          shell: false,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
 
     let stdout = '';
     let stderr = '';

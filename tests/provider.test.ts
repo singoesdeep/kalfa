@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeAbort, parseClaudeResult } from '../src/agents/provider.js';
+import { describeAbort, parseClaudeResult, quoteForCmd } from '../src/agents/provider.js';
 
 /**
  * The exit code lies.
@@ -66,5 +66,32 @@ describe('describeAbort', () => {
 
   it('falls back to naming an unrecognised subtype', () => {
     expect(describeAbort('error_something_new')).toContain('error_something_new');
+  });
+});
+
+/**
+ * On Windows these CLIs are .cmd shims, so a shell is required — and passing
+ * an args array with a shell concatenates them unescaped. That is not just
+ * Node's deprecation warning being fussy: the temp path handed to
+ * `--output-schema` contains the username, so any account with a space in it
+ * would have sent the reviewer a mangled path.
+ */
+describe('quoteForCmd', () => {
+  it('leaves ordinary arguments alone', () => {
+    expect(quoteForCmd('--sandbox')).toBe('--sandbox');
+    expect(quoteForCmd('read-only')).toBe('read-only');
+    const plain = String.raw`C:\Users\singo\tmp\schema.json`;
+    expect(quoteForCmd(plain)).toBe(plain);
+  });
+
+  it('quotes a path containing a space, which is the case that broke', () => {
+    const spaced = String.raw`C:\Users\John Smith\tmp\schema.json`;
+    expect(quoteForCmd(spaced)).toBe(`"${spaced}"`);
+  });
+
+  it('quotes cmd.exe metacharacters', () => {
+    for (const arg of ['a&b', 'a|b', 'a>b', 'a(b)', 'a%b%', 'a^b', 'a!b']) {
+      expect(quoteForCmd(arg), arg).toBe(`"${arg}"`);
+    }
   });
 });
