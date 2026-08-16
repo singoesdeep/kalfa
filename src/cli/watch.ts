@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { Plan } from '../plan/schema.js';
 import type { JournalEvent } from '../journal/journal.js';
 import { readRunRecord } from '../state/store.js';
+import { StateError, remedyFor } from '../state/schema.js';
 import { isProcessAlive, readLock } from '../state/lock.js';
 import { renderBoardPlain } from '../board/board.js';
 import { PHASE_LABEL, type Phase, type RunRecord } from '../types.js';
@@ -56,7 +57,14 @@ export async function watchRun(opts: WatchOptions): Promise<number> {
   const pollMs = opts.pollMs ?? 1000;
   const stateDir = opts.stateDir ?? '.kalfa';
 
-  const initial = readRunRecord(opts.cwd, stateDir);
+  let initial: RunRecord | undefined;
+  try {
+    initial = readRunRecord(opts.cwd, stateDir);
+  } catch (err) {
+    if (!(err instanceof StateError)) throw err;
+    write(`kalfa: ${err.message}\n  ${remedyFor(err.problem)}\n`);
+    return WATCH_EXIT.nothingToWatch;
+  }
   if (!initial) {
     write('kalfa: no run state found — nothing has been run in this repository yet\n');
     return WATCH_EXIT.nothingToWatch;
@@ -82,7 +90,15 @@ export async function watchRun(opts: WatchOptions): Promise<number> {
       if (event.runId === runId) printer.live(event);
     }
 
-    const record = readRunRecord(opts.cwd, stateDir) ?? initial;
+    // The run owns this file and is rewriting it underneath us. A read that
+    // comes back unreadable here is the watcher's problem to survive, not to
+    // report: fall back to the last good record and look again next tick.
+    let record = initial;
+    try {
+      record = readRunRecord(opts.cwd, stateDir) ?? initial;
+    } catch (err) {
+      if (!(err instanceof StateError)) throw err;
+    }
     if (printer.sawRunEnd || record.finishedAt) {
       return report(write, opts, record);
     }

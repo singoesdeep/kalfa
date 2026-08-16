@@ -26,6 +26,8 @@ import { renderReport } from '../doctor/render.js';
 import { ConfigError, loadConfig, loadPlan } from '../config/load.js';
 import { Runner } from '../runner/runner.js';
 import { StateStore, makeRunId, readRunRecord } from '../state/store.js';
+import { StateError, remedyFor } from '../state/schema.js';
+import type { RunRecord } from '../types.js';
 import { Journal } from '../journal/journal.js';
 import { topoOrder } from '../plan/schema.js';
 import { AUTONOMY_CONTRACT } from '../prompts/contract.js';
@@ -42,6 +44,22 @@ program
 function fail(message: string): never {
   process.stderr.write(`kalfa: ${message}\n`);
   process.exit(1);
+}
+
+/**
+ * Run state, or an exit with the reason and the fix.
+ *
+ * State that exists but cannot be read is not the same as no state, and the
+ * one thing the CLI must never do with the difference is shrug: a run that
+ * silently restarts pays again for every task it already finished.
+ */
+function readRunOrFail(cwd: string): RunRecord | undefined {
+  try {
+    return readRunRecord(cwd);
+  } catch (err) {
+    if (err instanceof StateError) fail(`${err.message}\n  ${remedyFor(err.problem)}`);
+    throw err;
+  }
 }
 
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
@@ -278,7 +296,7 @@ program
       return;
     }
 
-    const run = readRunRecord(cwd);
+    const run = readRunOrFail(cwd);
     if (!run) fail('no run state found — nothing has been run in this repository yet');
 
     if (opts.json) {
@@ -605,7 +623,7 @@ program
 
     // An interrupted run is the common case for wanting to start again, and
     // starting a *new* one instead silently redoes work already paid for.
-    const previous = readRunRecord(cwd);
+    const previous = readRunOrFail(cwd);
     const resuming = Boolean(opts.runId && previous?.runId === opts.runId);
     if (!opts.runId && !opts.new && previous && !previous.finishedAt) {
       const done = Object.values(previous.tasks).filter((t) => t.status === 'done').length;

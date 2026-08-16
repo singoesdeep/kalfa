@@ -180,6 +180,14 @@ export interface TaskRecord {
 }
 
 export interface RunRecord {
+  /**
+   * The shape this record was written in — see src/state/schema.ts.
+   *
+   * Present so a later CLI can tell an old run it can migrate from one it must
+   * refuse. State written before versioning existed is treated as v0 and
+   * stamped on first read.
+   */
+  schemaVersion: number;
   runId: string;
   /** True when some agent could not report its cost, so totals are a floor. */
   costIncomplete?: boolean;

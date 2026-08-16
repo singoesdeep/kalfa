@@ -169,7 +169,7 @@ The cost is that **each task is amnesiac**, so memory has to live on disk:
 | `docs/adr/` | every decision made instead of asking, one file each | every later task, and you |
 | `TASKS.md` | the board: status, attempts, commits, cost | you, mid-run |
 | `BLOCKED.md` | what it would not do, and why | you |
-| `.kalfa/state.json` | task status, attempts, cost | `--run-id` resume |
+| `.kalfa/state.json` | task status, attempts, cost, schema version | `--run-id` resume |
 | `.kalfa/journal.jsonl` | every event: phases, commands, decisions | you, `status --watch`, your tooling |
 | `.kalfa/runs/<id>/artifacts/` | per attempt: transcripts, gate output, diffs, findings | you, when a summary is not enough |
 | `kalfa.plan.json` | the plan | the run |
@@ -190,6 +190,21 @@ To pick up an interrupted run:
 
 ```bash
 kalfa run --run-id 20260816-031500    # completed tasks are skipped
+```
+
+Resuming across a Kalfa upgrade is safe. `.kalfa/state.json` carries a
+`schemaVersion` and is validated on every read, the same way the config and the
+plan are. State written by an older Kalfa is migrated in place — with a
+timestamped `.bak` of the original kept beside it — and state written by a
+*newer* Kalfa is refused rather than misread. Nothing malformed is ever
+silently treated as a fresh run, because a fresh run redoes work you have
+already paid for. `kalfa doctor` reports which case you are in before a resume
+spends anything:
+
+```
+run state    run 20260816-031500 · schema v1
+             8/13 task(s) done, unfinished
+             resume it: kalfa run --run-id 20260816-031500
 ```
 
 ## Why two vendors

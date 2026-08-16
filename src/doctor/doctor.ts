@@ -7,6 +7,12 @@ import { ConfigError, loadConfig, loadPlan } from '../config/load.js';
 import type { GateConfig, KalfaConfig, Provider } from '../config/schema.js';
 import type { Plan } from '../plan/schema.js';
 import { isStatePath } from '../state/dir.js';
+import {
+  STATE_SCHEMA_VERSION,
+  StateError,
+  readStateFile,
+  remedyFor,
+} from '../state/schema.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
 
@@ -399,6 +405,65 @@ function buildGateChecks(gate: GateConfig, cwd: string): Check[] {
 }
 
 /**
+ * Can this build read the run state sitting in this repository?
+ *
+ * Asked here because the alternative place to find out is `kalfa run
+ * --run-id`, and by then the answer costs money: a resume that cannot read its
+ * own state either refuses at the worst moment or, worse, starts over. Doctor
+ * is free and runs before the first token is spent.
+ */
+function buildStateCheck(cwd: string): Check {
+  const id = 'state';
+  const label = 'run state';
+  const path = join(cwd, '.kalfa', 'state.json');
+
+  let loaded;
+  try {
+    loaded = readStateFile(path);
+  } catch (err) {
+    if (!(err instanceof StateError)) throw err;
+    return {
+      id,
+      label,
+      status: 'fail',
+      detail: err.message.split('\n')[0] ?? err.message,
+      ...(err.message.includes('\n') ? { lines: err.message.split('\n').slice(1) } : {}),
+      remedy: remedyFor(err.problem),
+    };
+  }
+
+  if (!loaded) {
+    return { id, label, status: 'skip', detail: 'no previous run in this repository' };
+  }
+
+  const { record, diskVersion, migrated } = loaded;
+  const tasks = Object.values(record.tasks);
+  const done = tasks.filter((t) => t.status === 'done').length;
+  const lines = [
+    `${done}/${tasks.length} task(s) done` + (record.finishedAt ? ', run finished' : ', unfinished'),
+  ];
+  if (!record.finishedAt) lines.push(`resume it: kalfa run --run-id ${record.runId}`);
+
+  if (migrated) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `run ${record.runId} · schema v${diskVersion}, readable and will be migrated to v${STATE_SCHEMA_VERSION}`,
+      lines,
+      remedy: 'nothing to do — the next run migrates it and keeps a timestamped backup',
+    };
+  }
+  return {
+    id,
+    label,
+    status: 'ok',
+    detail: `run ${record.runId} · schema v${diskVersion}`,
+    lines,
+  };
+}
+
+/**
  * The full doctor report: an ordered list of checks a human or a first run
  * would want answered before trusting the repository to `kalfa run`
  * unattended. Never throws — a check that fails unexpectedly becomes a
@@ -611,6 +676,7 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
     planCheck,
     ...planGatesChecks,
     ...gateChecks,
+    guard('state', 'run state', () => buildStateCheck(cwd)),
   ];
 
   const counts = { ok: 0, warn: 0, fail: 0, skip: 0 };

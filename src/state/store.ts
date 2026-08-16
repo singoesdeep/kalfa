@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AttemptRecord, RunRecord, TaskRecord, TaskStatus } from '../types.js';
 import { ensureStateDir } from './dir.js';
+import { STATE_SCHEMA_VERSION, readStateFile } from './schema.js';
 
 /**
  * Run state, so a run that dies at 3am can be resumed at 9am without redoing
@@ -15,6 +16,12 @@ export class StateStore {
   private readonly dir: string;
   private record: RunRecord;
 
+  /**
+   * @throws StateError when existing state cannot be read, is structurally
+   * invalid, or was written by a newer Kalfa. Resuming is the whole point of
+   * this file; a reader that shrugs and starts over spends money to redo work
+   * that is sitting right there on disk.
+   */
   constructor(
     private readonly cwd: string,
     runId: string,
@@ -23,19 +30,27 @@ export class StateStore {
   ) {
     this.dir = ensureStateDir(cwd, stateDir);
     this.path = join(this.dir, 'state.json');
-    this.record = this.load(runId, planPath);
-  }
 
-  private load(runId: string, planPath: string): RunRecord {
-    if (existsSync(this.path)) {
-      try {
-        const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as RunRecord;
-        if (parsed.runId === runId) return parsed;
-      } catch {
-        // Corrupt state is discarded rather than guessed at.
+    const existing = readStateFile(this.path);
+    if (existing && existing.record.runId === runId) {
+      this.record = existing.record;
+      if (existing.migrated) {
+        // Keep the original. A migration is code, code has bugs, and the only
+        // copy of an interrupted run's provenance is not the place to find out.
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        copyFileSync(this.path, `${this.path}.v${existing.diskVersion}.${stamp}.bak`);
+        this.flush();
       }
+      return;
     }
-    return { runId, startedAt: new Date().toISOString(), planPath, tasks: {} };
+
+    this.record = {
+      schemaVersion: STATE_SCHEMA_VERSION,
+      runId,
+      startedAt: new Date().toISOString(),
+      planPath,
+      tasks: {},
+    };
   }
 
   get run(): RunRecord {
@@ -115,15 +130,17 @@ export class StateStore {
  * `StateStore` discards state belonging to a different run id, which is right
  * for writing and wrong for reading: `kalfa status` wants to report whatever
  * run last touched this repository, whichever it was.
+ *
+ * Migration happens in memory only. A reader is not an owner: `kalfa status`
+ * must be safe to run against a repository whose run belongs to a newer CLI,
+ * and safe means reporting the problem, not rewriting the file.
+ *
+ * @throws StateError when state exists but cannot be read as this build's
+ * shape. Returns undefined only when there is no state at all.
  */
 export function readRunRecord(cwd: string, stateDir = '.kalfa'): RunRecord | undefined {
   const path = join(cwd, stateDir, 'state.json');
-  if (!existsSync(path)) return undefined;
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as RunRecord;
-  } catch {
-    return undefined;
-  }
+  return readStateFile(path)?.record;
 }
 
 /** Stable, sortable, human-typable run id derived from the clock. */

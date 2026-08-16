@@ -15,6 +15,7 @@ const plan = PlanSchema.parse({
 });
 
 const run: RunRecord = {
+  schemaVersion: 1,
   runId: '20260816-031500',
   startedAt: '2026-08-16T03:15:00.000Z',
   planPath: 'kalfa.plan.json',
