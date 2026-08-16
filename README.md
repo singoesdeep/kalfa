@@ -37,11 +37,14 @@ plan.json  ──►  for each task, in dependency order:
                        ↓
                   gates run                        (typecheck, tests, lint…)
                        ↓ green
+                  did it touch a test?             → flag it, tell the reviewer
+                       ↓                             to verify, not to weigh
                   reviewer reads the diff          (codex)
                        ↓ no blocking findings
                   commit, next task
 
                   anything red? feed the failure back verbatim, retry
+                  last attempt, still blocked? ask the reviewer once more
                   out of attempts? stash it, log it, KEEP GOING
 ```
 
