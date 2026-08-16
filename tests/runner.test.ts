@@ -677,3 +677,100 @@ describe('runner: a task that rewrites tests never does it quietly', () => {
     );
   });
 });
+
+/**
+ * From a six-task run on a real codebase: the builder committed its own work,
+ * Kalfa's tree-versus-HEAD check saw a clean tree, concluded nothing had been
+ * produced, and retried twice before blocking — while the finished
+ * implementation sat at HEAD, never gated and never reviewed. It cost about
+ * $1.50 and skipped the two tasks that depended on it.
+ *
+ * The damage is worse than the waste: the reviewer reads `git diff HEAD`, so
+ * committed work is invisible to it.
+ */
+describe('runner: a worker that commits its own work', () => {
+  const commitsItself = (name: string) => (): AgentRun => {
+    writeFileSync(join(repo, name), 'work\n', 'utf8');
+    git(['add', '--all']);
+    git(['commit', '-q', '-m', 'the worker committing on its own']);
+    return ok();
+  };
+
+  it('undoes the commit and treats the work as produced', async () => {
+    const { runner, store } = harness({ policy: { review: false, max_attempts: 2 } }, [
+      { id: 'T1', title: 'first' },
+    ], { builder: stubAgent([commitsItself('a.txt')]) });
+
+    const summary = await runner.run();
+
+    expect(summary.counts.done).toBe(1);
+    expect(store.task('T1').attempts).toHaveLength(1);
+    expect(store.task('T1').attempts[0]?.outcome).toBe('passed');
+    expect(readFileSync(join(repo, 'a.txt'), 'utf8')).toBe('work\n');
+  });
+
+  it('lets the gates and the reviewer see work that was committed away', async () => {
+    let diffSeen = '';
+    const reviewer = {
+      label: 'stub',
+      provider: 'codex',
+      invoke: async (): Promise<AgentRun> => {
+        // The reviewer's whole view is the uncommitted diff.
+        diffSeen = git(['diff', 'HEAD', '--name-only']);
+        return { text: '{"findings":[]}', ok: true, costUsd: 0, costKnown: false, durationMs: 1 };
+      },
+    } as unknown as AgentInvoker;
+
+    const { runner } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, max_attempts: 1 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([commitsItself('b.txt')]), reviewer },
+    );
+
+    await runner.run();
+    expect(diffSeen).toContain('b.txt');
+  });
+
+  it('keeps the work in exactly one commit, Kalfa\'s own', async () => {
+    const { runner } = harness({}, [{ id: 'T1', title: 'first' }], {
+      builder: stubAgent([commitsItself('c.txt')]),
+    });
+    await runner.run();
+
+    const subjects = git(['log', '--format=%s']).split('\n');
+    expect(subjects).not.toContain('the worker committing on its own');
+    expect(subjects.some((s) => s.startsWith('T1:'))).toBe(true);
+  });
+});
+
+describe('runner: the blocked report matches reality', () => {
+  it('does not send you to an empty stash when nothing was stashed', async () => {
+    const { runner } = harness(
+      {
+        gates: [{ name: 'fails', run: 'exit 1' }],
+        policy: { review: false, max_attempts: 1, stash_failed_work: false },
+      },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([writes('a.txt')]) },
+    );
+
+    await runner.run();
+    const blocked = readFileSync(join(repo, 'BLOCKED.md'), 'utf8');
+    expect(blocked).not.toContain('the work is in the stash');
+    expect(blocked).toContain('nothing was stashed');
+  });
+
+  it('points at the stash when there really is one', async () => {
+    const { runner } = harness(
+      { gates: [{ name: 'fails', run: 'exit 1' }], policy: { review: false, max_attempts: 1 } },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([writes('a.txt')]) },
+    );
+
+    await runner.run();
+    expect(readFileSync(join(repo, 'BLOCKED.md'), 'utf8')).toContain('the work is in the stash');
+  });
+});

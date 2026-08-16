@@ -197,6 +197,9 @@ export function renderBoard(plan: Plan, run: RunRecord): string {
 
   const resumable = counts.pending > 0 || counts.blocked > 0 || counts.skipped > 0;
   lines.push(
+    // A heading directly after a table row is not a heading in strict
+    // Markdown; it renders as another row of the table.
+    ``,
     `## Next`,
     ``,
     ...(resumable

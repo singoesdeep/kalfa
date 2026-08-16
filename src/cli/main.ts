@@ -645,6 +645,16 @@ function render(event: RunnerEvent): void {
         );
       }
       break;
+    case 'worker_committed':
+      process.stdout.write(
+        `  ! the worker committed its own work — undone so the gates and reviewer can see it
+`,
+      );
+      break;
+    case 'retrying':
+      process.stdout.write(`  cause    ${event.reason}
+`);
+      break;
     case 'protected_touched':
       process.stdout.write(
         `  ! touched tests/checks: ${event.files.join(', ')} — flagged for review
@@ -664,7 +674,11 @@ function render(event: RunnerEvent): void {
       break;
     case 'task_done':
       if (event.status === 'done') {
-        process.stdout.write(`  -> done${event.commit ? ` ${event.commit.slice(0, 8)}` : ''}\n\n`);
+        // On a resume this is the only line a finished task prints, so it has
+        // to name the task: a column of bare "-> done" tells you nothing.
+        process.stdout.write(
+          `  -> ${event.taskId} done${event.commit ? ` ${event.commit.slice(0, 8)}` : ''}\n\n`,
+        );
       } else {
         process.stdout.write(`  -> ${event.status.toUpperCase()}: ${event.reason ?? ''}\n\n`);
       }

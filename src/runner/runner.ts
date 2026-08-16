@@ -42,6 +42,8 @@ export type RunnerEvent =
   | { type: 'review_done'; taskId: string; findings: number; blocking: number; error?: string }
   | { type: 'second_opinion'; taskId: string }
   | { type: 'protected_touched'; taskId: string; files: string[] }
+  | { type: 'worker_committed'; taskId: string }
+  | { type: 'retrying'; taskId: string; reason: string }
   | { type: 'task_done'; taskId: string; status: TaskStatus; commit?: string; reason?: string }
   | { type: 'run_end'; counts: Record<TaskStatus, number>; costUsd: number };
 
@@ -74,6 +76,7 @@ export class Runner {
   private lastFeedback: Feedback[] = [];
   private lastReport = '';
   private lastGateResults: GateResult[] = [];
+  private lastStashRef: string | undefined;
 
   constructor(private readonly opts: RunnerOptions) {
     const make =
@@ -280,6 +283,7 @@ export class Runner {
       if (this.opts.signal?.aborted) break;
 
       const attemptStart = Date.now();
+      const headBefore = git.headSha(cwd);
       if (attempt > 1 && feedback.length > 0) {
         prior.push({ attempt: attempt - 1, feedback: [...feedback] });
       }
@@ -289,6 +293,23 @@ export class Runner {
         attempt,
         max: config.policy.max_attempts,
       });
+
+      if (attempt > 1 && feedback.length > 0) {
+        // Without this a retry can appear in the log with no explanation at
+        // all — a builder line, then a bare `retry 2/3`. The reason existed
+        // internally and never reached the operator.
+        this.emit({
+          type: 'retrying',
+          taskId: task.id,
+          reason: feedback
+            .map((f) => {
+              const firstLine = f.detail.split('\n').find((l) => l.trim()) ?? '';
+              return `${f.source}: ${firstLine}`;
+            })
+            .join('; ')
+            .slice(0, 200),
+        });
+      }
 
       const prompt =
         attempt === 1
@@ -350,6 +371,20 @@ export class Runner {
           { kind: 'agent', source: this.builder.label, detail: run.error ?? 'worker failed' },
         ];
         continue;
+      }
+
+      // A worker that committed its own work has broken the invariant the rest
+      // of the pipeline depends on: the gates and the reviewer expect the
+      // task's changes to be uncommitted, and the reviewer literally reads
+      // `git diff HEAD`. Left alone this reads as "produced nothing" — a live
+      // run burned two retries and blocked a task whose finished
+      // implementation was sitting at HEAD, ungated and unreviewed.
+      //
+      // Soft-resetting puts the content back in the tree byte for byte.
+      if (git.headSha(cwd) !== headBefore) {
+        git.softResetTo(cwd, headBefore);
+        journal.event('worker_commit_undone', { taskId: task.id, attempt, headBefore });
+        this.emit({ type: 'worker_committed', taskId: task.id });
       }
 
       // "Has this task produced any work at all?" — measured against the last
@@ -607,8 +642,14 @@ export class Runner {
     if (this.lastReport) {
       parts.push(
         `WORKER'S FINAL REPORT:\n${this.lastReport.slice(0, 1500)}\n\n` +
-          `If the worker is right and the blocker above is wrong, the work is in ` +
-          `the stash and only needs committing.`,
+          `If the worker is right and the blocker above is wrong, ` +
+          // The recovery hint has to match reality. It once told a tired
+          // operator the work was in the stash when the stash was empty,
+          // sending them to look in the wrong place at the worst moment.
+          (this.lastStashRef
+            ? `the work is in the stash below and only needs committing.`
+            : `check \`git log\` and \`git status\` for where the work ended up — ` +
+              `nothing was stashed for this task.`),
       );
     }
 
@@ -622,6 +663,7 @@ export class Runner {
     if (config.policy.stash_failed_work && !git.isClean(cwd)) {
       stashRef = git.stashAll(cwd, `kalfa ${this.opts.runId} blocked ${task.id}`);
     }
+    this.lastStashRef = stashRef;
 
     store.setStatus(task.id, 'blocked', {
       reason,

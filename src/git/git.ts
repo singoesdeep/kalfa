@@ -97,6 +97,22 @@ export function headTreeHash(cwd: string): string {
   return git(['rev-parse', 'HEAD^{tree}'], cwd);
 }
 
+/**
+ * Undo a commit the worker made itself, keeping every change in the tree.
+ *
+ * Builders sometimes commit their own work despite not being asked to. That
+ * quietly breaks the invariant the whole pipeline rests on — the task's work
+ * is uncommitted when the gates and the reviewer look at it — and the damage
+ * is not cosmetic: the reviewer reads `git diff HEAD`, so it would be handed
+ * an empty diff and approve nothing at all.
+ *
+ * A soft reset puts the content back in the index without touching a single
+ * byte of it, and everything downstream then works as designed.
+ */
+export function softResetTo(cwd: string, sha: string): void {
+  git(['reset', '--soft', sha], cwd);
+}
+
 export function createBranch(cwd: string, name: string): void {
   git(['checkout', '-b', name], cwd);
 }
