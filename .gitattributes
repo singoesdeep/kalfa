@@ -1,0 +1,4 @@
+# The repository stores LF. Without this, Windows checkouts get CRLF in the
+# working tree and git warns on every single staged file, which buries
+# Kalfa's own output during a run.
+* text=auto eol=lf

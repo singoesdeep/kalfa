@@ -143,8 +143,7 @@ describe('git calls do not leak to the terminal', () => {
 
       const written: string[] = [];
       const original = process.stderr.write.bind(process.stderr);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (process.stderr as any).write = (chunk: string | Uint8Array): boolean => {
+      (process.stderr as unknown as { write: (c: string | Uint8Array) => boolean }).write = (chunk: string | Uint8Array): boolean => {
         written.push(String(chunk));
         return true;
       };
@@ -152,8 +151,7 @@ describe('git calls do not leak to the terminal', () => {
         // Probing a branch that does not exist makes git print to stderr.
         expect(gitModule.branchExists(repo, 'no-such-branch')).toBe(false);
       } finally {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (process.stderr as any).write = original;
+        (process.stderr as unknown as { write: (c: string | Uint8Array) => boolean }).write = original;
       }
 
       expect(written.join('')).not.toContain('fatal');

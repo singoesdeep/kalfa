@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # The runner drives git directly and the tests exercise it against real
+    # repositories, so it is worth knowing the behaviour holds on both
+    # platforms — line endings and path separators have already caused bugs
+    # here once.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Configure git for the runner tests
+        # They create throwaway repositories and commit to them; a runner has
+        # no identity configured and every commit would fail.
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+          git config --global commit.gpgsign false
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - run: npm run build
+
+      # The suite makes no API calls — it stubs the provider layer entirely —
+      # so this job never spends money and never needs credentials. The cost of
+      # that is that nothing here exercises the real CLIs; `scripts/smoke.mjs`
+      # does, and has to be run by hand.
