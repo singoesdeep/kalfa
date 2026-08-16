@@ -297,7 +297,14 @@ export class Runner {
               this.completedSoFar(),
               adrInstructions(nextAdrNumber(cwd), task.id),
             )
-          : retryPrompt(task, attempt, feedback, prior);
+          : retryPrompt(
+              task,
+              attempt,
+              feedback,
+              prior,
+              gateCommands,
+              adrInstructions(nextAdrNumber(cwd), task.id),
+            );
 
       const run = await this.builder.invoke(prompt, {
         cwd,

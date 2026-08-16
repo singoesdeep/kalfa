@@ -228,3 +228,43 @@ describe('reviewPrompt: upcoming plan context', () => {
     expect(reviewPrompt(task, [], undefined, [])).not.toContain('Still to come');
   });
 });
+
+/**
+ * A retry is a fresh session with no memory, so it needs the specification as
+ * much as the first attempt does. Without it the worker sees a title and an
+ * error message and has to reconstruct the requirement from the diff — which
+ * is how a retry confidently fixes the wrong thing.
+ */
+describe('retryPrompt carries the whole task, not just the failure', () => {
+  const prompt = retryPrompt(
+    task,
+    2,
+    [{ kind: 'gate', source: 'test', detail: 'boom' }],
+    [],
+    ['npm test'],
+    'ADR-INSTRUCTIONS-HERE',
+  );
+
+  it('repeats the task details', () => {
+    expect(prompt).toContain('Limit the webhook dispatcher to 10 rps.');
+  });
+
+  it('repeats the acceptance criteria it will be judged against', () => {
+    expect(prompt).toContain('Requests over the limit get 429');
+    expect(prompt).toContain('Limit is configurable');
+  });
+
+  it('repeats the verification commands', () => {
+    expect(prompt).toContain('npm test');
+  });
+
+  it('carries the decision-record format, which the retry has never seen', () => {
+    expect(prompt).toContain('ADR-INSTRUCTIONS-HERE');
+  });
+
+  it('still leads with the failure framing rather than reading as a fresh task', () => {
+    expect(prompt).toContain('attempt 2');
+    expect(prompt).toMatch(/NO memory of it/);
+    expect(prompt).toContain('boom');
+  });
+});

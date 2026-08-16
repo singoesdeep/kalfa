@@ -83,15 +83,15 @@ export function continuitySection(completed: Array<{ id: string; title: string }
   return lines.join('\n');
 }
 
-/** Rendered once per task, ahead of any retry feedback. */
-export function taskPrompt(
-  task: Task,
-  gateCommands: string[],
-  completed: Array<{ id: string; title: string }> = [],
-  adrInstructions?: string,
-): string {
-  const parts: string[] = [`# Task ${task.id}: ${task.title}`, continuitySection(completed)];
-  if (adrInstructions) parts.push(`## Recording decisions\n\n${adrInstructions}`);
+/**
+ * The task specification itself: what to build and how it will be judged.
+ *
+ * Shared by the first attempt and every retry. A retry runs in a fresh session
+ * too, so it needs this just as much — without it the worker sees only a title
+ * and an error message, and has to reconstruct the requirement from the diff.
+ */
+function specSections(task: Task, gateCommands: string[]): string[] {
+  const parts: string[] = [];
 
   if (task.details.trim()) parts.push(task.details.trim());
 
@@ -116,6 +116,19 @@ export function taskPrompt(
       : `## Verification commands\nNone configured. Verify your work however the repo allows.`,
   );
 
+  return parts;
+}
+
+/** Rendered once per task, ahead of any retry feedback. */
+export function taskPrompt(
+  task: Task,
+  gateCommands: string[],
+  completed: Array<{ id: string; title: string }> = [],
+  adrInstructions?: string,
+): string {
+  const parts: string[] = [`# Task ${task.id}: ${task.title}`, continuitySection(completed)];
+  if (adrInstructions) parts.push(`## Recording decisions\n\n${adrInstructions}`);
+  parts.push(...specSections(task, gateCommands));
   return parts.join('\n\n');
 }
 
@@ -168,6 +181,8 @@ export function retryPrompt(
   attempt: number,
   feedback: Feedback[],
   prior: PriorAttempt[] = [],
+  gateCommands: string[] = [],
+  adrInstructions?: string,
 ): string {
   const blocks = feedback.map((f) => {
     const heading =
@@ -191,6 +206,13 @@ export function retryPrompt(
       `done. It may be complete but wrong, or it may have stopped halfway. ` +
       `Fix it in place; do not start over, and do not redo work that is already ` +
       `correct.`,
+    // The task specification, repeated in full. A retry is a fresh session:
+    // without this it sees a title and an error and has to guess the
+    // requirement from the diff, which is how a retry "fixes" the wrong thing.
+    ...specSections(task, gateCommands),
+    ...(adrInstructions ? [`## Recording decisions
+
+${adrInstructions}`] : []),
     ...(prior.length > 0 ? [historySection(prior)] : []),
     ...blocks,
     `Fix the causes above. Do not weaken or delete tests or checks to make them ` +
