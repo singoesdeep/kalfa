@@ -71,6 +71,7 @@ const TaskRecordSchema = z
     reason: z.string().optional(),
     stashRef: z.string().optional(),
     protectedPaths: z.array(z.string()).optional(),
+    discardedFindings: z.array(z.string()).optional(),
     adrsWritten: z.number().optional(),
     costUsd: z.number().default(0),
     durationMs: z.number().default(0),

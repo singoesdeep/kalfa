@@ -1,4 +1,5 @@
 import type { RunnerEvent } from '../runner/runner.js';
+import { formatDiscarded } from '../review/claims.js';
 import { PHASE_LABEL, type ReviewFinding } from '../types.js';
 
 /**
@@ -117,6 +118,15 @@ export function createRenderer(opts: RenderOptions): (event: RunnerEvent) => voi
 
       case 'protected_touched':
         write(`  ! touched tests/checks: ${event.files.join(', ')} — flagged for review\n`);
+        break;
+
+      // Printed before the review line it belongs to reads "clean", so the
+      // absence of a blocker is never mistaken for the absence of a claim.
+      case 'claims_discarded':
+        write(
+          `  ! ${event.findings.length} review finding(s) discarded — git does not support them\n`,
+        );
+        for (const line of formatDiscarded(event.findings)) write(`           ${line}\n`);
         break;
 
       case 'second_opinion':

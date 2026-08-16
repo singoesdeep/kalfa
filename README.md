@@ -40,6 +40,9 @@ plan.json  ──►  for each task, in dependency order:
                   did it touch a test?             → flag it, tell the reviewer
                        ↓                             to verify, not to weigh
                   reviewer reads the diff          (codex)
+                       ↓
+                  does the diff support its        → no? discard the finding,
+                  claims about what changed?         say so, do not block
                        ↓ no blocking findings
                   commit, next task
 
@@ -283,6 +286,49 @@ by default) gets three things:
 Mechanical detection, human judgement. Set `protected_paths: []` to switch it
 off.
 
+### Claims git can settle
+
+The reviewer is the only judgement in the pipeline that nothing checks, and the
+cost of that showed up in the worst possible shape. Asked to review a *correct*
+fix, reviewers twice reported as a blocker that a test file had been weakened —
+when `git diff HEAD --name-only` did not list the file at all. Correct work was
+thrown away over a change that never happened.
+
+A blocking finding is a claim about a diff, and some of those claims the diff
+itself can settle. So every finding now carries a label the reviewer sets:
+
+| `claim` | Means | Checked? |
+|---|---|---|
+| `file_changed` | "this diff did something to `file`" — modified, added, deleted, weakened | yes |
+| `other` | a change that is *missing*, a caller not updated, anything about behaviour | no |
+
+A `file_changed` finding whose path is not in the pending change list is
+**discarded**: it never blocks, never costs an attempt, and never reaches the
+retry prompt. No agent runs, nothing is re-asked, nothing is spent — it is a
+name lookup against the list Kalfa already computed for protected paths.
+
+The check is deliberately narrow, and the bias throughout is towards letting a
+finding stand:
+
+- only `file_changed` is checkable at all, because "you forgot to update
+  `src/other.ts`" necessarily names a file outside the diff and must survive;
+- an unlabelled finding is never discarded;
+- path matching is lenient — absolute paths, `a/`/`b/` prefixes, `:42` line
+  references, a bare filename and a directory all match. Only a name that
+  matches nothing is treated as evidence of anything;
+- an unrecognised label degrades to `other` rather than failing the payload,
+  because an unparseable review blocks the task.
+
+Discarding is never silent. The run log prints the finding and why it was
+dropped, the journal records it as `review_claims_discarded`,
+`review.findings.json` keeps every finding with its verdict attached, and
+`TASKS.md` grows a **Review findings the diff did not support** section. That
+last one matters most on a task that then *passed* — nothing else in the
+morning would tell you the reviewer made a claim about a file it never saw.
+
+Set `verify_review_claims: false` to switch it off and give the reviewer the
+last word again.
+
 ## Requirements
 
 - Node 20+
@@ -393,7 +439,7 @@ Every line a run prints is short, and each one names the file behind it. Under
 | `builder.report.md` | its final message |
 | `gates/<name>.stdout.log`, `.stderr.log` | each gate's full output, per stream, untrimmed |
 | `diff.patch`, `diff.stat.txt` | the diff the reviewer was actually shown |
-| `review.findings.json` | its complete findings, every severity, not just the blocking count |
+| `review.findings.json` | its complete findings, every severity, each with git's verdict on its claim |
 | `review.raw.txt` | its untruncated response — including when it could not be parsed |
 | `decision.json` | what the attempt concluded, why, and which files prove it |
 
@@ -617,6 +663,7 @@ See `kalfa.yaml` from `kalfa init`. The parts worth thinking about:
 policy:
   max_attempts: 3             # per task, including the first
   blocking_severity: major    # which review findings force a retry
+  verify_review_claims: true  # check a finding against the diff before it may block
   abort_after_consecutive_blocks: 3
   # max_run_cost_usd: 25.0
 ```
@@ -661,15 +708,16 @@ notify:
 - **No quality measurement.** The gates prove the code compiles, passes tests
   and survives review. Nothing measures whether the result is *good*. That
   judgement is still yours — which is what the morning diff is for.
-- **The reviewer produces false positives, and one is enough to block a task.**
-  Observed live: it reported as a blocker that a test file had been modified
-  when git showed it untouched, which cost the task both its attempts. A
-  single reviewer opinion is treated as authoritative, with no second vote and
-  no way for the builder to win an argument. When gates are green and only the
-  review blocks, BLOCKED.md records the finding, the worker'''s answer to it,
-  where the work is parked, and the attempt directory holding the reviewer'''s
-  complete response and the diff it was shown — so you can adjudicate against
-  the evidence rather than guess.
+- **The reviewer still produces false positives that nothing can settle.**
+  The one class git can refute — a claim that this diff changed a file it did
+  not touch — is now checked before a finding may block anything (see
+  *Claims git can settle*). Everything else is a judgement: a bug that is not
+  a bug, a convention that is not a convention. There is no second vote for
+  those except on the final attempt, and no way for the builder to win an
+  argument. When gates are green and only the review blocks, BLOCKED.md records
+  the finding, the worker'''s answer to it, where the work is parked, and the
+  attempt directory holding the reviewer'''s complete response and the diff it
+  was shown — so you can adjudicate against the evidence rather than guess.
 - **Only the claude provider reports tool-level activity.** `claude -p` is run
   with `--output-format stream-json`, so every tool call the builder makes is
   an event you can watch. `codex exec` reports nothing comparable, so a codex

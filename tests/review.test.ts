@@ -41,6 +41,27 @@ describe('parseReviewPayload', () => {
     expect(findings?.[0]?.suggestion).toBeUndefined();
   });
 
+  it('reads the claim label the mechanical check runs off', () => {
+    const findings = parseReviewPayload(
+      '{"findings":[{"severity":"blocker","summary":"x","claim":"file_changed"}]}',
+    );
+    expect(findings?.[0]?.claim).toBe('file_changed');
+  });
+
+  // An unreadable review blocks the task, so a strict enum here would let one
+  // improvised label cost the work. Anything unrecognised means "not checkable".
+  it('degrades an unrecognised claim label to "other" rather than failing the payload', () => {
+    const findings = parseReviewPayload(
+      '{"findings":[{"severity":"blocker","summary":"x","claim":"file-changed"}]}',
+    );
+    expect(findings?.[0]?.claim).toBe('other');
+  });
+
+  it('leaves the claim absent when the reviewer omitted it', () => {
+    const findings = parseReviewPayload('{"findings":[{"severity":"major","summary":"x","claim":null}]}');
+    expect(findings?.[0]?.claim).toBeUndefined();
+  });
+
   it('still accepts fields that are genuinely present', () => {
     const findings = parseReviewPayload(
       '{"findings":[{"severity":"blocker","summary":"x","file":"a.ts","line":4,"suggestion":"fix"}]}',
@@ -63,6 +84,12 @@ describe('REVIEW_OUTPUT_SCHEMA', () => {
     expect(props.file.type).toEqual(['string', 'null']);
     expect(props.line.type).toEqual(['integer', 'null']);
     expect(props.summary.type).toBe('string');
+  });
+
+  it('asks the reviewer to classify its own claim, which is what the check runs off', () => {
+    const props = REVIEW_OUTPUT_SCHEMA.properties.findings.items.properties;
+    expect(props.claim.enum).toContain('file_changed');
+    expect(props.claim.enum).toContain('other');
   });
 });
 

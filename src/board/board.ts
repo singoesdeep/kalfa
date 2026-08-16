@@ -153,6 +153,31 @@ export function renderBoard(plan: Plan, run: RunRecord): string {
     }
   }
 
+  // A reviewer that made a claim about a file the diff never touched is worth
+  // a line whether or not the task went on to pass — especially then, because
+  // nothing else in the morning would mention it.
+  const refuted = ordered
+    .map((task) => ({ task, lines: run.tasks[task.id]?.discardedFindings ?? [] }))
+    .filter((entry) => entry.lines.length > 0);
+
+  if (refuted.length > 0) {
+    lines.push(
+      ``,
+      `## Review findings the diff did not support`,
+      ``,
+      `These findings claimed this diff changed a file that \`git\` shows it did`,
+      `not touch. They were discarded: they never blocked a task and never cost`,
+      `an attempt. Listed because a reviewer inventing a change is a fact about`,
+      `the review, not about the code.`,
+      ``,
+    );
+    for (const { task, lines: found } of refuted) {
+      lines.push(`### ${task.id}: ${task.title}`, ``);
+      for (const line of found) lines.push(`- ${line}`);
+      lines.push(``);
+    }
+  }
+
   // A run that resolved every task without recording one decision is worth
   // noticing. It means either the spec left nothing to assume — the good case
   // — or assumptions were made and never written down. Kalfa cannot tell which;

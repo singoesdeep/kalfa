@@ -3,7 +3,8 @@ import type { AgentInvoker, InvokeOptions } from '../agents/provider.js';
 import type { Task } from '../plan/schema.js';
 import { REVIEW_OUTPUT_SCHEMA, reviewPrompt } from '../prompts/contract.js';
 import { SEVERITY_RANK, type PolicyConfig } from '../config/schema.js';
-import type { ReviewFinding, ReviewResult } from '../types.js';
+import type { ReviewClaim, ReviewFinding, ReviewResult } from '../types.js';
+import { checkFindings } from './claims.js';
 
 /**
  * The cross-model review gate.
@@ -25,6 +26,21 @@ const nullableString = z
   .nullish()
   .transform((v) => v ?? undefined);
 
+/**
+ * Anything that is not exactly "file_changed" becomes "other".
+ *
+ * Not an enum, deliberately. A strict enum would make one unexpected string
+ * fail the whole payload, and an unparseable review blocks the task — so a
+ * model improvising a claim label would cost the work. Falling back to "other"
+ * costs only the mechanical check on that finding, which is the safe direction.
+ */
+const nullableClaim = z
+  .string()
+  .nullish()
+  .transform((v): ReviewClaim | undefined =>
+    v == null ? undefined : v === 'file_changed' ? 'file_changed' : 'other',
+  );
+
 const FindingSchema = z.object({
   severity: z.enum(['blocker', 'major', 'minor']),
   summary: z.string(),
@@ -35,6 +51,7 @@ const FindingSchema = z.object({
     .nullish()
     .transform((v) => v ?? undefined),
   suggestion: nullableString,
+  claim: nullableClaim,
 });
 
 const ReviewPayloadSchema = z.object({ findings: z.array(FindingSchema) });
@@ -94,6 +111,14 @@ export interface ReviewOptions {
   protectedCallout?: string;
   upcoming?: Array<{ id: string; title: string }>;
   /**
+   * The files this diff actually touches, for checking the findings against.
+   *
+   * Supplied by the caller rather than read here: the runner already has it
+   * (protected-path detection runs off the same list) and a review that shells
+   * out to git on its own could read a tree the reviewer never saw.
+   */
+  changedFiles?: string[];
+  /**
    * Persist a piece of the review and return the path it landed at.
    *
    * The run log can only afford a line per finding, and BLOCKED.md a
@@ -144,6 +169,7 @@ export async function reviewTask(opts: ReviewOptions): Promise<ReviewResult> {
     return {
       findings: [],
       blocking: [],
+      discarded: [],
       costUsd: run.costUsd,
       costKnown: run.costKnown,
       durationMs: run.durationMs,
@@ -159,6 +185,7 @@ export async function reviewTask(opts: ReviewOptions): Promise<ReviewResult> {
     return {
       findings: [],
       blocking: [],
+      discarded: [],
       costUsd: run.costUsd,
       costKnown: run.costKnown,
       durationMs: run.durationMs,
@@ -167,11 +194,22 @@ export async function reviewTask(opts: ReviewOptions): Promise<ReviewResult> {
     };
   }
 
-  const findingsPath = capture('findings', `${JSON.stringify({ findings }, null, 2)}\n`);
+  // The one check on the reviewer. A finding that says the diff did something
+  // the diff did not do is reported and then ignored — it never blocks, and it
+  // never costs an attempt. See src/review/claims.ts for why this is narrow.
+  const checked = opts.changedFiles
+    ? checkFindings(findings, opts.changedFiles)
+    : { all: findings, discarded: [] as ReviewFinding[], standing: findings };
+
+  const findingsPath = capture(
+    'findings',
+    `${JSON.stringify({ findings: checked.all, discarded: checked.discarded }, null, 2)}\n`,
+  );
 
   return {
-    findings,
-    blocking: blockingFindings(findings, policy.blocking_severity),
+    findings: checked.all,
+    blocking: blockingFindings(checked.standing, policy.blocking_severity),
+    discarded: checked.discarded,
     costUsd: run.costUsd,
     costKnown: run.costKnown,
     durationMs: run.durationMs,

@@ -86,6 +86,19 @@ export const PolicySchema = z
      * Only a clean second read overturns the block.
      */
     review_second_opinion: z.boolean().default(true),
+    /**
+     * Check a finding's claim against the diff before it may block a task.
+     *
+     * A finding the reviewer labels `file_changed` names a file it says this
+     * diff touched. That is looked up in the pending change list, and a finding
+     * naming a file git shows untouched is reported and then discarded — it was
+     * refuted by the only authority in the room that cannot be talked round.
+     * Findings about anything else are untouched by this.
+     *
+     * Costs nothing and calls no one. Turn it off only if you would rather
+     * adjudicate a fabricated blocker yourself in the morning.
+     */
+    verify_review_claims: z.boolean().default(true),
     /** Commit after each task passes, so a failure never loses earlier work. */
     commit_per_task: z.boolean().default(true),
     /** Branch to create for the run. `{run_id}` is substituted. */

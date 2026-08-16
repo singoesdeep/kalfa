@@ -407,6 +407,140 @@ describe('runner: the review gate', () => {
   });
 });
 
+/**
+ * The one check on the reviewer.
+ *
+ * A blocking finding is a claim about a diff, and some of those claims the
+ * diff itself can settle. This is the failure it was built from: a reviewer
+ * reporting that a test file had been weakened, when git showed the file was
+ * never in the diff at all — and the task losing its attempts to it.
+ */
+describe('runner: a reviewer claim git can refute', () => {
+  const reviewJson = (findings: unknown[]): AgentRun => ({
+    text: JSON.stringify({ findings }),
+    ok: true,
+    costUsd: 0.002,
+    costKnown: true,
+    durationMs: 3,
+  });
+
+  const fabricated = {
+    severity: 'blocker',
+    summary: 'the test file was weakened to make the gate pass',
+    file: 'src/a.test.ts',
+    claim: 'file_changed',
+  };
+
+  it('does not let a blocker about an untouched file cost the task anything', async () => {
+    const { runner, store } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, blocking_severity: 'major', max_attempts: 3 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt')]),
+        reviewer: stubAgent([() => reviewJson([fabricated])]),
+      },
+    );
+
+    const summary = await runner.run();
+    expect(summary.counts.done).toBe(1);
+    // One attempt: the finding never reached the blocking decision.
+    expect(store.task('T1').attempts).toHaveLength(1);
+    expect(store.task('T1').attempts[0]?.outcome).toBe('passed');
+  });
+
+  it('says so on the board, since a task that passed would otherwise never mention it', async () => {
+    const { runner, store } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, max_attempts: 1 },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt')]),
+        reviewer: stubAgent([() => reviewJson([fabricated])]),
+      },
+    );
+
+    await runner.run();
+    expect(store.task('T1').discardedFindings?.[0]).toContain('src/a.test.ts');
+    const board = readFileSync(join(repo, 'TASKS.md'), 'utf8');
+    expect(board).toContain('Review findings the diff did not support');
+    expect(board).toContain('src/a.test.ts');
+  });
+
+  it('still blocks on a claim the diff supports', async () => {
+    const { runner } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, max_attempts: 1, review_second_opinion: false },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt')]),
+        reviewer: stubAgent([
+          () =>
+            reviewJson([{ ...fabricated, file: 'a.txt', summary: 'this really is in the diff' }]),
+        ]),
+      },
+    );
+
+    expect((await runner.run()).counts.blocked).toBe(1);
+  });
+
+  // The check is narrow on purpose: it can refute "you changed X", and nothing
+  // else. A finding about a change that is *missing* names a file outside the
+  // diff by definition, and must survive.
+  it('still blocks on a finding the reviewer did not claim was a change', async () => {
+    const { runner } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: { review: true, max_attempts: 1, review_second_opinion: false },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt')]),
+        reviewer: stubAgent([
+          () =>
+            reviewJson([
+              {
+                severity: 'blocker',
+                summary: 'the caller in src/other.ts was never updated',
+                file: 'src/other.ts',
+                claim: 'other',
+              },
+            ]),
+        ]),
+      },
+    );
+
+    expect((await runner.run()).counts.blocked).toBe(1);
+  });
+
+  it('can be turned off, leaving the reviewer the last word', async () => {
+    const { runner } = harness(
+      {
+        agents: { builder: { provider: 'claude' }, reviewer: { provider: 'codex' } },
+        policy: {
+          review: true,
+          max_attempts: 1,
+          review_second_opinion: false,
+          verify_review_claims: false,
+        },
+      },
+      [{ id: 'T1', title: 'first' }],
+      {
+        builder: stubAgent([writes('a.txt')]),
+        reviewer: stubAgent([() => reviewJson([fabricated])]),
+      },
+    );
+
+    expect((await runner.run()).counts.blocked).toBe(1);
+  });
+});
+
 describe('runner: resume', () => {
   it('skips tasks already marked done by an earlier run of the same id', async () => {
     const first = harness({}, [{ id: 'T1', title: 'a' }, { id: 'T2', title: 'b' }], {

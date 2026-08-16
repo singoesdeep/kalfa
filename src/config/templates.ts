@@ -50,6 +50,13 @@ policy:
   # nothing changed), so re-ask once before throwing the work away.
   review_second_opinion: true
 
+  # Check a finding against git before it is allowed to block. A reviewer that
+  # reports "you weakened src/x.test.ts" when that file is not in the diff has
+  # been refuted by the one authority that cannot be argued with, so the
+  # finding is reported and discarded instead of costing the task an attempt.
+  # Findings about anything else — missing changes, behaviour — are untouched.
+  verify_review_claims: true
+
   # Files a task should not normally be rewriting. Touching one is not
   # forbidden — it is reported: the reviewer is told to verify the
   # justification rather than accept it, and TASKS.md grows a section naming

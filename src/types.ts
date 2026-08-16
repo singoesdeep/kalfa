@@ -110,6 +110,24 @@ export interface GateResult {
   truncated?: boolean;
 }
 
+/**
+ * What kind of claim a finding is making, as the reviewer classifies it.
+ *
+ * `file_changed` means "this diff did something to `file`" — the one class of
+ * claim git can settle on its own, and the class a fabricated blocker falls
+ * into. Everything else is `other`: a change that is missing, a caller that
+ * should have been updated, a concern about behaviour. Those are checked by no
+ * one but you.
+ */
+export type ReviewClaim = 'file_changed' | 'other';
+
+/** What git had to say about a finding's claim. See src/review/claims.ts. */
+export interface ClaimCheck {
+  status: 'supported' | 'unsupported' | 'unverifiable';
+  /** One line of why, so a discarded finding is never merely asserted away. */
+  reason?: string;
+}
+
 export interface ReviewFinding {
   severity: 'blocker' | 'major' | 'minor';
   summary: string;
@@ -118,12 +136,27 @@ export interface ReviewFinding {
   file?: string | undefined;
   line?: number | undefined;
   suggestion?: string | undefined;
+  /** How the reviewer classified its own claim. Absent means unclassified. */
+  claim?: ReviewClaim | undefined;
+  /** Kalfa's mechanical verdict on it. Attached after parsing, never by the model. */
+  check?: ClaimCheck | undefined;
 }
 
 export interface ReviewResult {
   findings: ReviewFinding[];
-  /** Findings at or above the configured blocking severity. */
+  /**
+   * Findings at or above the configured blocking severity.
+   *
+   * Never includes a finding git refuted — see `discarded`.
+   */
   blocking: ReviewFinding[];
+  /**
+   * Findings dropped because the diff does not contain what they claim it does.
+   *
+   * Reported everywhere and enforced nowhere. A reviewer that invents a change
+   * is worth knowing about even on a task that then passes.
+   */
+  discarded: ReviewFinding[];
   costUsd: number;
   /** False when the provider does not report cost — see AgentRun.costKnown. */
   costKnown: boolean;
@@ -166,6 +199,14 @@ export interface TaskRecord {
   stashRef?: string;
   /** Test or check files this task modified. Surfaced for human review. */
   protectedPaths?: string[];
+  /**
+   * Review findings git refuted, one line each.
+   *
+   * Kept on the task rather than only in the journal because the interesting
+   * case is a task that then *passed*: nothing else in the morning would say
+   * that the reviewer made a claim about a file it never looked at.
+   */
+  discardedFindings?: string[];
   /**
    * Decision records this task produced.
    *

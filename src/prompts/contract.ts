@@ -273,6 +273,20 @@ export function reviewPrompt(
     `   untouched. A task is about to be judged on your answer — a fabricated`,
     `   blocker throws away correct work. Quote the offending line from the diff,`,
     `   or do not raise the finding.`,
+    ``,
+    `   **This is now checked mechanically.** Every finding carries a \`claim\``,
+    `   field. Set it to "file_changed" when your finding is about something this`,
+    `   diff did to \`file\` — modified it, added it, deleted it, weakened it.`,
+    `   Kalfa looks that path up in \`git diff HEAD --name-only\` before the`,
+    `   finding is allowed to block anything, and **discards it if the file is`,
+    `   not there**, however severe you marked it.`,
+    ``,
+    `   Set \`claim\` to "other" for everything else — a change that is missing, a`,
+    `   caller that should have been updated, a file that should exist and does`,
+    `   not, or any concern about behaviour rather than about the diff's contents.`,
+    `   Those are not checked and are not discarded. Label honestly: "other" is`,
+    `   not a way to smuggle a claim past the check, and "file_changed" on a file`,
+    `   you have not seen in the diff simply loses you the finding.`,
     ...(upcomingBlock ? [upcomingBlock] : []),
     ...(protectedCallout ? [protectedCallout] : []),
     `3. **Scope** — changes unrelated to the task.`,
@@ -285,6 +299,9 @@ export function reviewPrompt(
     ``,
     `## Output`,
     `Reply with JSON matching the required schema and nothing else.`,
+    `Set \`claim\` on every finding: "file_changed" if it is about what this diff`,
+    `did to \`file\` (that one is verified against git and dropped if the file is`,
+    `not in the diff), "other" for anything else.`,
     `Severity: "blocker" = must fix before commit; "major" = real defect;`,
     `"minor" = style or preference. Be strict about correctness and cheating,`,
     `and lenient about taste — you are a gate, not a style guide. An empty`,
@@ -317,7 +334,7 @@ export const REVIEW_OUTPUT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['severity', 'summary', 'file', 'line', 'suggestion'],
+        required: ['severity', 'summary', 'file', 'line', 'suggestion', 'claim'],
         properties: {
           severity: { type: 'string', enum: ['blocker', 'major', 'minor'] },
           summary: { type: 'string' },
@@ -325,6 +342,15 @@ export const REVIEW_OUTPUT_SCHEMA = {
           file: { type: ['string', 'null'] },
           line: { type: ['integer', 'null'] },
           suggestion: { type: ['string', 'null'] },
+          /**
+           * Whether this finding asserts something about what the diff did.
+           *
+           * Enumerated rather than inferred: Kalfa can look a path up in the
+           * diff, but it cannot tell "you weakened this test" from "you should
+           * have updated this file", and only the first of those is refutable
+           * by a name lookup. The reviewer knows which it wrote.
+           */
+          claim: { type: ['string', 'null'], enum: ['file_changed', 'other', null] },
         },
       },
     },

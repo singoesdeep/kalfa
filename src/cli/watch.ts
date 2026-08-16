@@ -292,6 +292,10 @@ export function describe(event: JournalEvent): string | undefined {
       return `${where} review ${
         field('error') ? `ERROR ${field('error')?.slice(0, 80)}` : `${String(event['blocking'] ?? 0)} blocking`
       }`;
+    case 'review_claims_discarded': {
+      const findings = (event['findings'] as unknown[]) ?? [];
+      return `${where} review ${findings.length} finding(s) discarded — not supported by the diff`;
+    }
     case 'retry_decision':
       return `${where} retrying${event['causedBy'] ? ` — evidence ${String(event['causedBy'])}/` : ''}`;
     case 'task_done':

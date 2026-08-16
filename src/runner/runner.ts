@@ -11,6 +11,7 @@ import {
 } from '../gates/gates.js';
 import { protectedAmong, protectedPathsCallout } from '../gates/protected.js';
 import { formatFindings, reviewTask } from '../review/review.js';
+import { formatDiscarded } from '../review/claims.js';
 import {
   AUTONOMY_CONTRACT,
   retryPrompt,
@@ -129,6 +130,14 @@ export type RunnerEvent =
       details?: ReviewFinding[];
     }
   | { type: 'second_opinion'; taskId: string; attempt: number }
+  /** Findings git refuted, so they never reached the blocking decision. */
+  | {
+      type: 'claims_discarded';
+      taskId: string;
+      attempt: number;
+      second: boolean;
+      findings: ReviewFinding[];
+    }
   | { type: 'protected_touched'; taskId: string; files: string[] }
   | { type: 'worker_committed'; taskId: string }
   /** Why the next attempt is happening, and where the evidence for it is. */
@@ -341,14 +350,18 @@ export class Runner {
    * the summary is worthless — "reviewer returned unparseable output" — is
    * exactly the case where you need to see what it really said.
    */
-  private async invokeReview(
-    task: Task,
-    attempt: number,
-    gateCommands: string[],
-    callout: string | undefined,
-    evidence: string[],
-    second = false,
-  ): Promise<ReviewResult> {
+  private async invokeReview(opts: {
+    task: Task;
+    attempt: number;
+    gateCommands: string[];
+    callout?: string | undefined;
+    evidence: string[];
+    /** What the diff actually touches, for checking findings against. */
+    changedFiles: string[];
+    second?: boolean;
+  }): Promise<ReviewResult> {
+    const { task, attempt, gateCommands, callout, evidence, changedFiles } = opts;
+    const second = opts.second ?? false;
     const reviewer = this.reviewer!;
     const prefix = second ? 'review.second' : 'review';
     const started = Date.now();
@@ -361,6 +374,7 @@ export class Runner {
       policy: this.opts.config.policy,
       ...(this.opts.signal ? { signal: this.opts.signal } : {}),
       ...(callout ? { protectedCallout: callout } : {}),
+      ...(this.opts.config.policy.verify_review_claims ? { changedFiles } : {}),
       upcoming: this.remainingAfter(task),
       ...(this.opts.artifacts
         ? {
@@ -401,6 +415,30 @@ export class Runner {
       ok: !result.error,
       durationMs: Date.now() - started,
     });
+
+    // Announced whatever the task goes on to do. The case that most needs
+    // saying is the quiet one: a task that passes because the only blocker
+    // against it was a claim about a file the diff never touched.
+    if (result.discarded.length > 0) {
+      this.emit({
+        type: 'claims_discarded',
+        taskId: task.id,
+        attempt,
+        second,
+        findings: result.discarded,
+      });
+      this.opts.journal.event('review_claims_discarded', {
+        taskId: task.id,
+        attempt,
+        phase: (second ? 'second_opinion' : 'review') satisfies Phase,
+        findings: result.discarded,
+      });
+      const record = this.opts.store.task(task.id);
+      this.opts.store.setStatus(task.id, record.status, {
+        discardedFindings: [...(record.discardedFindings ?? []), ...formatDiscarded(result.discarded)],
+      });
+      this.refreshBoard();
+    }
     return result;
   }
 
@@ -1011,10 +1049,11 @@ export class Runner {
       // Detected before the review, because it changes what the review is
       // told to do: a test that moves with the implementation is the one thing
       // a reviewer must not take on trust.
-      const touchedProtected = protectedAmong(
-        git.pendingFiles(cwd),
-        config.policy.protected_paths,
-      );
+      // Read once and used twice: the files this diff touches decide both what
+      // the reviewer is warned about and, afterwards, which of its findings
+      // survive. Both have to be looking at the same tree the reviewer will.
+      const pendingFiles = git.pendingFiles(cwd);
+      const touchedProtected = protectedAmong(pendingFiles, config.policy.protected_paths);
       if (touchedProtected.length > 0) {
         store.setStatus(task.id, 'running', { protectedPaths: touchedProtected });
         this.refreshBoard();
@@ -1030,7 +1069,14 @@ export class Runner {
 
       if (wantsReview && this.reviewer) {
         this.phase(task.id, attempt, 'review', this.reviewer.label);
-        const review = await this.invokeReview(task, attempt, gateCommands, callout, evidence);
+        const review = await this.invokeReview({
+          task,
+          attempt,
+          gateCommands,
+          callout,
+          evidence,
+          changedFiles: pendingFiles,
+        });
         this.emit({
           type: 'review_done',
           taskId: task.id,
@@ -1094,7 +1140,15 @@ export class Runner {
         if (blocking.length > 0 && lastChance && config.policy.review_second_opinion) {
           this.emit({ type: 'second_opinion', taskId: task.id, attempt });
           this.phase(task.id, attempt, 'second_opinion', this.reviewer.label);
-          const second = await this.invokeReview(task, attempt, gateCommands, callout, evidence, true);
+          const second = await this.invokeReview({
+            task,
+            attempt,
+            gateCommands,
+            callout,
+            evidence,
+            changedFiles: pendingFiles,
+            second: true,
+          });
           if (!second.costKnown) this.noteCostIncomplete();
           reviewCostUsd += second.costUsd;
           journal.event('second_opinion', {
