@@ -92,8 +92,9 @@ export async function reviewTask(
   policy: PolicyConfig,
   signal?: AbortSignal,
   protectedCallout?: string,
+  upcoming: Array<{ id: string; title: string }> = [],
 ): Promise<ReviewResult> {
-  const run = await reviewer.invoke(reviewPrompt(task, gateCommands, protectedCallout), {
+  const run = await reviewer.invoke(reviewPrompt(task, gateCommands, protectedCallout, upcoming), {
     cwd,
     outputSchema: REVIEW_OUTPUT_SCHEMA,
     ...(signal ? { signal } : {}),

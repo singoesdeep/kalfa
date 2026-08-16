@@ -194,3 +194,37 @@ describe('retry history', () => {
     expect(prompt).not.toContain('Already tried and failed');
   });
 });
+
+/**
+ * The reviewer sees a diff and nothing else, so it cannot normally tell that
+ * a locally fine change has painted a later task into a corner. Naming what
+ * is still to come is cheap; the framing is the hard part, because a reviewer
+ * told about future work will otherwise demand it be built now.
+ */
+describe('reviewPrompt: upcoming plan context', () => {
+  const upcoming = [
+    { id: 'T7', title: 'Add per-tenant quotas' },
+    { id: 'T8', title: 'Expose the limiter over HTTP' },
+  ];
+
+  it('names what is still to come', () => {
+    const prompt = reviewPrompt(task, [], undefined, upcoming);
+    expect(prompt).toContain('T7: Add per-tenant quotas');
+    expect(prompt).toContain('T8: Expose the limiter over HTTP');
+  });
+
+  it('forbids demanding future work now, which would be scope creep', () => {
+    const prompt = reviewPrompt(task, [], undefined, upcoming);
+    expect(prompt).toMatch(/context, not scope/);
+    expect(prompt).toMatch(/Do NOT ask for any of it to be implemented/);
+  });
+
+  it('sets a high bar: impossible or much harder, not merely unimplemented', () => {
+    const prompt = reviewPrompt(task, [], undefined, upcoming);
+    expect(prompt).toMatch(/actively makes one of them impossible or\s+much harder/);
+  });
+
+  it('omits the section on the last task, where nothing follows', () => {
+    expect(reviewPrompt(task, [], undefined, [])).not.toContain('Still to come');
+  });
+});

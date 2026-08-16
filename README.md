@@ -431,8 +431,10 @@ them reported without forcing a retry.
 - **Nothing verifies that an agent actually recorded its decisions.** The
   contract requires it and the reviewer can notice its absence, but a task can
   pass every gate having quietly assumed something and written nothing down.
-- **The reviewer sees the diff, not the plan's history.** It cannot tell you a
-  task was solved in a way that will make task 7 impossible.
+- **The reviewer knows what is coming but not what happened.** It is given the
+  titles of the tasks still to come, so it can flag a change that paints one of
+  them into a corner — but it still sees only the current diff, not how the
+  earlier tasks were solved.
 - **An unparseable review blocks the task.** A reviewer that cannot be read is
   never treated as a pass, which means reviewer flakiness costs you tasks.
 - **The planner is never re-consulted.** If the plan turns out to be wrong at
@@ -445,7 +447,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 172 tests, no API calls
+npm test         # 176 tests, no API calls
 npm run typecheck
 npm run build
 ```

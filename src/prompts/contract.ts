@@ -204,7 +204,26 @@ export function reviewPrompt(
   task: Task,
   gateCommands: string[],
   protectedCallout?: string,
+  upcoming: Array<{ id: string; title: string }> = [],
 ): string {
+  // The reviewer sees a diff, which means it cannot normally tell that a
+  // locally fine change has painted a later task into a corner. Naming what is
+  // still to come is cheap; the framing matters, because a reviewer told about
+  // future work will otherwise demand it be done now.
+  const upcomingBlock =
+    upcoming.length > 0
+      ? [
+          ``,
+          `## Still to come in this plan`,
+          ...upcoming.map((t) => `- ${t.id}: ${t.title}`),
+          ``,
+          `This is context, not scope. Do NOT ask for any of it to be implemented`,
+          `here — that is a later task and doing it now would be scope creep.`,
+          `Raise it only if this change actively makes one of them impossible or`,
+          `much harder: an interface with no room for it, a schema that would need`,
+          `rewriting, an assumption baked in that the later task must undo.`,
+        ].join('\n')
+      : '';
   return [
     `You are reviewing an autonomous agent's uncommitted work in this repository.`,
     `Run \`git diff HEAD\` (and \`git status\`) to see it, plus \`git diff HEAD --stat\` for scope.`,
@@ -232,6 +251,7 @@ export function reviewPrompt(
     `   untouched. A task is about to be judged on your answer — a fabricated`,
     `   blocker throws away correct work. Quote the offending line from the diff,`,
     `   or do not raise the finding.`,
+    ...(upcomingBlock ? [upcomingBlock] : []),
     ...(protectedCallout ? [protectedCallout] : []),
     `3. **Scope** — changes unrelated to the task.`,
     `4. **Integration** — does it match the conventions and types of the surrounding code?`,

@@ -208,6 +208,19 @@ export class Runner {
    * code itself is in the repository, and re-summarizing it into the prompt
    * would be both expensive and a worse source than reading it.
    */
+  /**
+   * Tasks still to come, so the reviewer can spot a change that paints one of
+   * them into a corner. It sees a diff and nothing else otherwise.
+   */
+  private remainingAfter(current: Task): Array<{ id: string; title: string }> {
+    const ordered = topoOrder(this.opts.plan);
+    const index = ordered.findIndex((t) => t.id === current.id);
+    return ordered
+      .slice(index + 1)
+      .filter((task) => !this.opts.store.isDone(task.id))
+      .map((task) => ({ id: task.id, title: task.title }));
+  }
+
   private completedSoFar(): Array<{ id: string; title: string }> {
     return topoOrder(this.opts.plan)
       .filter((task) => this.opts.store.isDone(task.id))
@@ -405,6 +418,7 @@ export class Runner {
           config.policy,
           this.opts.signal,
           callout,
+          this.remainingAfter(task),
         );
         this.emit({
           type: 'review_done',
@@ -461,6 +475,7 @@ export class Runner {
             config.policy,
             this.opts.signal,
             callout,
+            this.remainingAfter(task),
           );
           if (!second.costKnown) this.noteCostIncomplete();
           reviewCostUsd += second.costUsd;
