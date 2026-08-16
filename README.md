@@ -242,6 +242,39 @@ by default) gets three things:
 Mechanical detection, human judgement. Set `protected_paths: []` to switch it
 off.
 
+## Is it ready?
+
+`kalfa doctor` answers that before you spend anything. It runs nothing of
+yours — no gates are executed, no prompts are sent, no money is spent — and
+every check in it exists because something actually went wrong here first:
+
+```
+  ok    git repo    /home/you/project
+  ok    commits     ed16ea7d on main
+  ok    clean tree  clean
+  ok    claude CLI  2.1.227 (Claude Code)
+  ok    codex CLI   codex-cli 0.146.0
+  ok    config      /home/you/project/kalfa.yaml
+                    builder   claude (sonnet)
+                    reviewer  codex
+                    gates     typecheck, test
+  ok    agents      no advisory warnings
+  ok    plan        4 tasks
+  ok    plan gates  all task gate references resolve
+  ok    gate check  npm  /usr/local/bin/npm
+
+10 ok
+
+ready — nothing here would stop `kalfa run`.
+```
+
+A failure carries its remedy on the next line rather than at the end of the
+report, and the command exits non-zero so it can gate a script.
+
+Most of `doctor` was written by Kalfa itself, unattended, from a spec that
+`kalfa spec` generated — including the Windows PATHEXT handling in its
+executable resolution, which is the sort of detail that gets skipped by hand.
+
 ## Requirements
 
 - Node 20+
@@ -264,6 +297,7 @@ npm link            # optional: puts `kalfa` on your PATH
 
 ```bash
 cd your-project
+kalfa doctor                            # is this repo and machine ready?
 kalfa init                              # writes kalfa.yaml + a plan template
 kalfa spec "add rate limiting to the webhook dispatcher"   # PRD + SPEC
 kalfa plan                              # tasks, from the spec
@@ -284,6 +318,7 @@ kalfa run --run-id <id>    # resume: finished tasks are skipped
 
 | Command | What it does |
 |---|---|
+| `kalfa doctor` | Check this repo and machine are ready. Runs nothing, spends nothing |
 | `kalfa init [--force]` | Write starter `kalfa.yaml` and `kalfa.plan.json` |
 | `kalfa spec "<goal>"` | Inspect the repo, ask its questions once, write `docs/PRD.md` + `docs/SPEC.md` |
 | `kalfa plan [goal]` | Write a validated plan. The goal is optional once a SPEC exists |
@@ -487,7 +522,7 @@ them reported without forcing a retry.
 ## Development
 
 ```bash
-npm test         # 190 tests, no API calls
+npm test         # 212 tests, no API calls
 npm run typecheck
 npm run build
 ```

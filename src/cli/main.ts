@@ -16,6 +16,8 @@ import { ensureStateDir } from '../state/dir.js';
 import { acquireLock, LockError } from '../state/lock.js';
 import { generateSpec, readSpec, writeSpec, PRD_PATH, SPEC_PATH } from '../spec/spec.js';
 import { renderBoardPlain } from '../board/board.js';
+import { runDoctor } from '../doctor/doctor.js';
+import { renderReport } from '../doctor/render.js';
 import { ConfigError, loadConfig, loadPlan } from '../config/load.js';
 import { Runner, type RunnerEvent } from '../runner/runner.js';
 import { StateStore, makeRunId, readRunRecord } from '../state/store.js';
@@ -168,6 +170,31 @@ program
   .description('Print the autonomy contract handed to every agent')
   .action(() => {
     process.stdout.write(`${AUTONOMY_CONTRACT}\n`);
+  });
+
+program
+  .command('doctor')
+  .description('Check that this repository and machine are ready for a run')
+  .option('-c, --config <path>', 'config file')
+  .option('-p, --plan <path>', 'plan file', 'kalfa.plan.json')
+  .option('--json', 'machine-readable output')
+  .action(async (opts: { config?: string; plan: string; json?: boolean }) => {
+    // Every check here exists because something actually went wrong: a missing
+    // CLI, a permission mode that silently cannot run tests, a dirty tree, a
+    // gate command that is not on PATH. Cheap to run, and it runs nothing of
+    // yours — no gates are executed, no prompts are sent, no money is spent.
+    const report = await runDoctor({
+      cwd: process.cwd(),
+      ...(opts.config ? { configPath: opts.config } : {}),
+      ...(opts.plan ? { planPath: opts.plan } : {}),
+    });
+
+    process.stdout.write(
+      opts.json ? `${JSON.stringify(report, null, 2)}
+` : `${renderReport(report)}
+`,
+    );
+    if (!report.ok) process.exitCode = 1;
   });
 
 program
