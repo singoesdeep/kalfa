@@ -606,6 +606,52 @@ Which is why the plan is worth reading before you run it, even when `kalfa
 plan` wrote it. Reading a generated plan takes five minutes; a bad plan costs
 you a night.
 
+### What a wrong dependency costs
+
+`deps` is the cheapest field in the plan to write and the most expensive to be
+wrong about. A blocked task skips every task that declares a dependency on it,
+whether or not the dependency was real — so an edge the planner invented turns
+one failure into three.
+
+It invents them. On a six-task run the planner produced a strictly linear
+chain, every task depending on exactly its predecessor, including a
+documentation task that depended on the CLI task before it. Task 4 failed and
+tasks 5 and 6 were skipped for a dependency neither of them had.
+
+Nothing can tell a real edge from an invented one — that needs to know what the
+code does. So `kalfa plan` and `kalfa validate` do the part that is mechanical:
+they put the shape of the graph, and what each task's failure would take down
+with it, in front of you before anything runs.
+
+```
+  tasks     4, execution order:
+     1. T1: token bucket   [3 skipped if it blocks]
+     2. T2: wire into dispatcher  <- T1   [2 skipped if it blocks]
+     3. T3: config surface  <- T2   [1 skipped if it blocks]
+     4. T4: document it  <- T3
+  warning:  this plan is a strict linear chain — every task depends on exactly
+            the one before it. Planners produce that shape by default and it is
+            rarely the real graph. It also has no slack: the first task to block
+            takes every task after it down with it, needed or not.
+            Read each `deps` and delete the ones that are not real.
+```
+
+Three things, in decreasing order of confidence:
+
+- **The blast radius**, per task, always. Exact and not a judgement: it is the
+  count of transitive dependents.
+- **A strict linear chain**, when the whole plan is one. That is the planner's
+  default output and almost never the real graph. Only reported at three tasks
+  or more, because with two "the second needs the first" is ordinary.
+- **Dependencies between tasks that share no declared `files`.** Weak on its
+  own — a task can import what an earlier one wrote without touching its files
+  — but it is where an invented edge shows up. Suppressed under a chain
+  warning, which has already said to check every edge, and bounded to five so
+  it stays readable.
+
+None of this fails a plan. Deleting an edge you do not need is a one-line edit
+now and a wasted night later.
+
 ## The autonomy contract
 
 Every agent gets the same preamble. `kalfa contract` prints it in full; the
@@ -758,15 +804,20 @@ notify:
 - **`kalfa plan` validates structure, not judgement.** It checks that ids
   resolve, dependencies exist and there are no cycles. Nothing checks that the
   tasks are the right tasks.
-- **The planner invents dependencies.** On a six-task run it produced a
-  strictly linear chain — every task depending on exactly its predecessor,
-  including a documentation task that depended on the CLI task before it. The
-  prompt tells it not to do this. It did it anyway, and the cost was real: when
-  task 4 failed, tasks 5 and 6 were skipped for a dependency neither of them
-  needed.
+- **The planner still invents dependencies; nothing can tell that it has.**
+  On a six-task run it produced a strictly linear chain — every task depending
+  on exactly its predecessor, including a documentation task that depended on
+  the CLI task before it. The prompt tells it not to do this. It did it anyway,
+  and the cost was real: when task 4 failed, tasks 5 and 6 were skipped for a
+  dependency neither of them needed. `plan` and `validate` now report the shape
+  and what it would cost (see *What a wrong dependency costs*), but that is a
+  prompt to read, not a check — telling a real edge from an invented one needs
+  to know what the code does.
 - **Tasks that block cascade further than they should**, for the same reason.
   A skipped task is skipped on its declared dependency, and a declared
-  dependency that is not a real one turns one failure into three.
+  dependency that is not a real one turns one failure into three. Kalfa prints
+  the blast radius per task before the run; it does not second-guess it during
+  one.
 
 ## Development
 

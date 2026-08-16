@@ -30,6 +30,7 @@ import { StateError, remedyFor } from '../state/schema.js';
 import type { RunRecord } from '../types.js';
 import { Journal } from '../journal/journal.js';
 import { topoOrder } from '../plan/schema.js';
+import { analyseDeps, formatDepWarnings } from '../plan/deps.js';
 import { AUTONOMY_CONTRACT } from '../prompts/contract.js';
 import { writeStarterFiles } from '../config/init.js';
 import * as git from '../git/git.js';
@@ -211,10 +212,19 @@ program
       process.stdout.write(`\nplan    ${planPath}\n`);
       process.stdout.write(`  goal      ${plan.goal}\n`);
       process.stdout.write(`  tasks     ${plan.tasks.length}, execution order:\n`);
+      // The blast radius, printed on the line it belongs to. A dependency is
+      // cheap to declare and expensive to be wrong about: a task that blocks
+      // takes every transitive dependent with it, real edge or invented one.
+      const { cascade } = analyseDeps(plan);
       for (const [i, task] of ordered.entries()) {
         const deps = task.deps.length > 0 ? `  <- ${task.deps.join(', ')}` : '';
-        process.stdout.write(`    ${String(i + 1).padStart(2)}. ${task.id}: ${task.title}${deps}\n`);
+        const blast = cascade.get(task.id) ?? 0;
+        const cost = blast > 0 ? `   [${blast} skipped if it blocks]` : '';
+        process.stdout.write(
+          `    ${String(i + 1).padStart(2)}. ${task.id}: ${task.title}${deps}${cost}\n`,
+        );
       }
+      for (const line of formatDepWarnings(plan)) process.stdout.write(`${line}\n`);
       process.stdout.write('\nok\n');
     } catch (err) {
       if (err instanceof ConfigError) fail(err.message);
@@ -548,10 +558,19 @@ program
       writeFileSync(outPath, `${JSON.stringify(result.plan, null, 2)}\n`, 'utf8');
 
       process.stdout.write(`\nwrote ${opts.out} — ${result.plan.tasks.length} tasks, ${usd(costUsd)}\n\n`);
+      const generated = analyseDeps(result.plan);
       for (const [i, task] of topoOrder(result.plan).entries()) {
         const deps = task.deps.length > 0 ? `  <- ${task.deps.join(', ')}` : '';
-        process.stdout.write(`  ${String(i + 1).padStart(2)}. ${task.id}: ${task.title}${deps}\n`);
+        const blast = generated.cascade.get(task.id) ?? 0;
+        const cost = blast > 0 ? `   [${blast} skipped if it blocks]` : '';
+        process.stdout.write(
+          `  ${String(i + 1).padStart(2)}. ${task.id}: ${task.title}${deps}${cost}\n`,
+        );
       }
+      // The planner is the one that invents dependencies, so this is the first
+      // moment the reader can act on it — before the plan is ever run.
+      const advice = formatDepWarnings(result.plan, '');
+      if (advice.length > 0) process.stdout.write(`\n${advice.join('\n')}\n`);
       process.stdout.write(
         `\nRead it before running. Every vague \`details\` field becomes an\n` +
           `assumption recorded as an ADR that nobody will be awake to catch.\n` +
