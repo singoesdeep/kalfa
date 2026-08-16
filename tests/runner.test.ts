@@ -99,9 +99,25 @@ describe('runner: the happy path', () => {
     expect(summary.counts.done).toBe(2);
     expect(summary.counts.blocked).toBe(0);
     expect(store.task('T1').commit).toBeTruthy();
-    // seed + begin-run + one commit per task + finish-run
-    expect(git(['log', '--oneline']).split('\n')).toHaveLength(5);
+    // seed + begin-run + (start + task) per task + finish-run
+    expect(git(['log', '--oneline']).split('\n')).toHaveLength(7);
     expect(git(['status', '--porcelain'])).toBe('');
+  });
+
+  // A live reviewer's only finding, on the first run where review worked, was
+  // that the task commit contained Kalfa's board churn rather than anything
+  // about the code. Bookkeeping must land before the builder starts.
+  it('keeps its own bookkeeping out of the task commit', async () => {
+    const { runner } = harness({}, [{ id: 'T1', title: 'first' }], {
+      builder: stubAgent([writes('a.txt')]),
+    });
+    await runner.run();
+
+    const files = git(['show', '--name-only', '--format=', 'HEAD~1'])
+      .split('\n')
+      .filter(Boolean);
+    expect(files).toEqual(['a.txt']);
+    expect(files).not.toContain('TASKS.md');
   });
 
   it('records the run id in the commit message, so work is traceable', async () => {

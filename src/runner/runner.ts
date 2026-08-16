@@ -218,6 +218,15 @@ export class Runner {
 
     store.setStatus(task.id, 'running');
     this.refreshBoard();
+    // Land the board BEFORE the builder starts.
+    //
+    // Found by the reviewer on the first run where it worked: the board is
+    // rewritten when a task starts, `git add --all` swept it into the task
+    // commit, and the reviewer — which reads the uncommitted diff — spent its
+    // only finding complaining about Kalfa bookkeeping instead of the code.
+    // Committing it up front leaves the builder and the reviewer looking at
+    // nothing but the task's own work.
+    this.commitBookkeeping(`kalfa: start ${task.id}`);
     journal.event('task_start', { taskId: task.id, title: task.title });
 
     let feedback: Feedback[] = [];

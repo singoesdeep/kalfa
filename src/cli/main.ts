@@ -90,6 +90,21 @@ program
       process.stdout.write(`config  ${path}\n`);
       process.stdout.write(`  builder   ${config.agents.builder.provider}`);
       process.stdout.write(config.agents.builder.model ? ` (${config.agents.builder.model})\n` : '\n');
+      // Observed in a real run: with acceptEdits the builder made its edit,
+      // was denied Bash, and ended with "I need your approval to run
+      // node check.mjs" — reported as a successful run, work unverified.
+      if (
+        config.agents.builder.provider === 'claude' &&
+        config.agents.builder.permission_mode === 'acceptEdits' &&
+        !config.agents.builder.allowed_tools?.some((t) => t.startsWith('Bash'))
+      ) {
+        process.stdout.write(
+          `  warning:  builder uses permission_mode acceptEdits, which auto-approves\n` +
+            `            edits but NOT Bash. Unattended, it will stop and ask for approval\n` +
+            `            before it can run your tests, and report that as a finished task.\n` +
+            `            Use bypassPermissions, or list Bash in allowed_tools.\n`,
+        );
+      }
       if (config.agents.reviewer) {
         process.stdout.write(`  reviewer  ${config.agents.reviewer.provider}`);
         process.stdout.write(

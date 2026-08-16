@@ -15,12 +15,26 @@ import type { ReviewFinding, ReviewResult } from '../types.js';
  * misunderstanding.
  */
 
+/**
+ * Optional fields arrive as explicit nulls, because the output schema has to
+ * list every key as required (see REVIEW_OUTPUT_SCHEMA). Normalize null to
+ * absent here so the rest of the code never has to think about it.
+ */
+const nullableString = z
+  .string()
+  .nullish()
+  .transform((v) => v ?? undefined);
+
 const FindingSchema = z.object({
   severity: z.enum(['blocker', 'major', 'minor']),
-  file: z.string().optional(),
-  line: z.number().int().optional(),
   summary: z.string(),
-  suggestion: z.string().optional(),
+  file: nullableString,
+  line: z
+    .number()
+    .int()
+    .nullish()
+    .transform((v) => v ?? undefined),
+  suggestion: nullableString,
 });
 
 const ReviewPayloadSchema = z.object({ findings: z.array(FindingSchema) });

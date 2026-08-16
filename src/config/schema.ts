@@ -16,12 +16,23 @@ export const AgentSchema = z
     /** Provider-native model id or alias. Omitted uses the CLI's default. */
     model: z.string().optional(),
     /**
-     * claude: acceptEdits | bypassPermissions | ...
-     * Kalfa never runs interactively, so a mode that can prompt will hang.
+     * claude permission mode.
+     *
+     * `acceptEdits` is NOT enough for a builder. It auto-approves file edits
+     * but not Bash, so an unattended worker that needs to run the test suite
+     * stops and reports "I need your approval to run ...". It looks like a
+     * successful run — the CLI exits zero and the summary reads like a
+     * report — while the work is actually unverified.
+     *
+     * A builder therefore wants `bypassPermissions`. That is a real grant of
+     * power, and the reason it is acceptable here is the surrounding
+     * machinery: preflight refuses a dirty tree, work happens on a branch
+     * Kalfa cut, every task is its own commit, and nothing ever pushes. Git
+     * is the undo button.
      */
     permission_mode: z
       .enum(['acceptEdits', 'bypassPermissions', 'dontAsk', 'auto'])
-      .default('acceptEdits'),
+      .default('bypassPermissions'),
     /** codex sandbox policy. Ignored for the claude provider. */
     sandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']).default('workspace-write'),
     max_turns: z.number().int().positive().optional(),

@@ -189,7 +189,19 @@ export function reviewPrompt(task: Task, gateCommands: string[]): string {
     .join('\n');
 }
 
-/** JSON Schema handed to the reviewer so findings come back machine-readable. */
+/**
+ * JSON Schema handed to the reviewer so findings come back machine-readable.
+ *
+ * Strict structured output requires `required` to list EVERY key in
+ * `properties` — omitting a key to make it optional is rejected outright:
+ *
+ *   invalid_json_schema: 'required' is required to be supplied and to be an
+ *   array including every key in properties. Missing 'file'.
+ *
+ * So optionality is expressed as a nullable type instead, and the parser maps
+ * null back to absent. Getting this wrong is not a soft failure: the request
+ * 400s, the CLI retries it, and the review hangs until its timeout.
+ */
 export const REVIEW_OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -200,13 +212,14 @@ export const REVIEW_OUTPUT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['severity', 'summary'],
+        required: ['severity', 'summary', 'file', 'line', 'suggestion'],
         properties: {
           severity: { type: 'string', enum: ['blocker', 'major', 'minor'] },
-          file: { type: 'string' },
-          line: { type: 'integer' },
           summary: { type: 'string' },
-          suggestion: { type: 'string' },
+          // null, not absent — see above.
+          file: { type: ['string', 'null'] },
+          line: { type: ['integer', 'null'] },
+          suggestion: { type: ['string', 'null'] },
         },
       },
     },

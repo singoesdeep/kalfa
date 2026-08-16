@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { blockingFindings, formatFindings, parseReviewPayload } from '../src/review/review.js';
+import { REVIEW_OUTPUT_SCHEMA } from '../src/prompts/contract.js';
 import type { ReviewFinding } from '../src/types.js';
 
 describe('parseReviewPayload', () => {
@@ -25,6 +26,43 @@ describe('parseReviewPayload', () => {
 
   it('rejects a payload with an invalid severity', () => {
     expect(parseReviewPayload('{"findings":[{"severity":"critical","summary":"x"}]}')).toBeUndefined();
+  });
+
+  // Strict structured output requires every property in `required`, so
+  // optional fields come back as explicit nulls rather than being absent.
+  // A live run 400d and retried for ten minutes before this was right.
+  it('normalizes the explicit nulls the output schema forces', () => {
+    const findings = parseReviewPayload(
+      '{"findings":[{"severity":"major","summary":"boom","file":null,"line":null,"suggestion":null}]}',
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings?.[0]?.file).toBeUndefined();
+    expect(findings?.[0]?.line).toBeUndefined();
+    expect(findings?.[0]?.suggestion).toBeUndefined();
+  });
+
+  it('still accepts fields that are genuinely present', () => {
+    const findings = parseReviewPayload(
+      '{"findings":[{"severity":"blocker","summary":"x","file":"a.ts","line":4,"suggestion":"fix"}]}',
+    );
+    expect(findings?.[0]?.file).toBe('a.ts');
+    expect(findings?.[0]?.line).toBe(4);
+  });
+});
+
+describe('REVIEW_OUTPUT_SCHEMA', () => {
+  it('lists every property as required, which strict mode demands', () => {
+    const item = REVIEW_OUTPUT_SCHEMA.properties.findings.items;
+    expect([...item.required].sort()).toEqual(
+      Object.keys(item.properties).sort(),
+    );
+  });
+
+  it('expresses optionality as a nullable type instead', () => {
+    const props = REVIEW_OUTPUT_SCHEMA.properties.findings.items.properties;
+    expect(props.file.type).toEqual(['string', 'null']);
+    expect(props.line.type).toEqual(['integer', 'null']);
+    expect(props.summary.type).toBe('string');
   });
 });
 

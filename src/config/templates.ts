@@ -10,7 +10,10 @@ agents:
   builder:
     provider: claude
     model: sonnet             # alias or full model id; omit for the CLI default
-    permission_mode: acceptEdits
+    # bypassPermissions, not acceptEdits: acceptEdits auto-approves edits but
+    # NOT Bash, so an unattended builder stops and asks before it can run your
+    # tests — and reports success while leaving the work unverified.
+    permission_mode: bypassPermissions
     max_turns: 60
     timeout_ms: 1800000       # 30 min per attempt
 
