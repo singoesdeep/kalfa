@@ -805,6 +805,10 @@ notify:
   produces and `TASKS.md` says plainly when a run completed tasks and recorded
   nothing — which is the right outcome if the spec left nothing open, and
   indistinguishable from the wrong one. A live two-task run did exactly this.
+- **A blocked task's decision records are in the stash, not your tree.** They
+  are counted, `BLOCKED.md` says how many and where, and `TASKS.md` names them
+  under *Needs you* — but `docs/adr/` itself will look empty, because the block
+  parked the whole working tree. `git stash apply` brings the reasoning back.
 - **The reviewer knows what is coming but not what happened.** It is given the
   titles of the tasks still to come, so it can flag a change that paints one of
   them into a corner — but it still sees only the current diff, not how the

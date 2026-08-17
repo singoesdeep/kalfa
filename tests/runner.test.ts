@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -906,5 +906,70 @@ describe('runner: the blocked report matches reality', () => {
 
     await runner.run();
     expect(readFileSync(join(repo, 'BLOCKED.md'), 'utf8')).toContain('the work is in the stash');
+  });
+});
+
+/**
+ * A task that blocked still reasoned about something.
+ *
+ * Decision records were only ever counted on the way to `done`, which got the
+ * accounting backwards: the task whose reasoning matters most is the one that
+ * could not finish, and it is also the one whose reasoning is about to be
+ * parked in a stash where nobody looks. Observed on a benchmark run — the
+ * builder met a plan it could not satisfy, wrote two records totalling 180
+ * lines arguing its way to a decision, and the board said the run had recorded
+ * none.
+ */
+describe('runner: decision records survive a block', () => {
+  /** A builder that reasons in writing and then fails its gate anyway. */
+  const arguesAndFails = (): AgentRun => {
+    mkdirSync(join(repo, 'docs', 'adr'), { recursive: true });
+    writeFileSync(
+      join(repo, 'docs', 'adr', '0001-use-exact-arithmetic.md'),
+      '# 0001. Use exact arithmetic\n\n- **Status:** accepted\n\n## Context\nThe suite cannot be satisfied as specified.\n',
+      'utf8',
+    );
+    writeFileSync(join(repo, 'a.txt'), 'attempted\n', 'utf8');
+    return ok();
+  };
+
+  const failing = { name: 'check', run: 'node -e "process.exit(1)"' };
+
+  it('counts what a blocked task recorded, before the stash takes it away', async () => {
+    const { runner, store } = harness(
+      { gates: [failing], policy: { max_attempts: 1, review: false } },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([arguesAndFails]) },
+    );
+
+    expect((await runner.run()).counts.blocked).toBe(1);
+    expect(store.task('T1').adrsWritten).toBe(1);
+  });
+
+  it('tells the reader the records are in the stash, not in their tree', async () => {
+    const { runner } = harness(
+      { gates: [failing], policy: { max_attempts: 1, review: false } },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([arguesAndFails]) },
+    );
+    await runner.run();
+
+    const blocked = readFileSync(join(repo, 'BLOCKED.md'), 'utf8');
+    expect(blocked).toContain('DECISIONS RECORDED: 1');
+    expect(blocked).toMatch(/In the stash below/);
+    // And the records really are gone from the tree, which is why it says so.
+    expect(existsSync(join(repo, 'docs', 'adr', '0001-use-exact-arithmetic.md'))).toBe(false);
+  });
+
+  it('says nothing when a blocked task recorded nothing', async () => {
+    const { runner, store } = harness(
+      { gates: [failing], policy: { max_attempts: 1, review: false } },
+      [{ id: 'T1', title: 'first' }],
+      { builder: stubAgent([writes('a.txt')]) },
+    );
+    await runner.run();
+
+    expect(store.task('T1').adrsWritten).toBeUndefined();
+    expect(readFileSync(join(repo, 'BLOCKED.md'), 'utf8')).not.toContain('DECISIONS RECORDED');
   });
 });

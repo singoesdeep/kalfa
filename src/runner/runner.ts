@@ -1161,7 +1161,7 @@ export class Runner {
             reason: `reviewer could not run: ${review.error}`,
             evidence,
           });
-          return this.blockTask(task, `reviewer could not run: ${review.error}`);
+          return this.blockTask(task, `reviewer could not run: ${review.error}`, adrsBefore);
         }
 
         let blocking = review.blocking;
@@ -1260,7 +1260,11 @@ export class Runner {
       return this.completeTask(task, attempt, adrsBefore);
     }
 
-    return this.blockTask(task, `no attempt passed verification in ${config.policy.max_attempts} attempts`);
+    return this.blockTask(
+      task,
+      `no attempt passed verification in ${config.policy.max_attempts} attempts`,
+      adrsBefore,
+    );
   }
 
   private completeTask(task: Task, attempt: number, adrsBefore = 0): TaskStatus {
@@ -1366,10 +1370,24 @@ export class Runner {
     return parts.length > 0 ? parts.join('\n\n') : undefined;
   }
 
-  private blockTask(task: Task, reason: string): TaskStatus {
+  private blockTask(task: Task, reason: string, adrsBefore = 0): TaskStatus {
     const { cwd, config, store, journal } = this.opts;
 
     const attempt = store.task(task.id).attempts.length;
+
+    /**
+     * Counted here, before the stash, because the stash takes them with it.
+     *
+     * Only completed tasks used to have their decision records counted, which
+     * got the accounting exactly backwards: a task that blocked is the one
+     * whose reasoning matters most, and it is also the one whose reasoning is
+     * about to be parked in a stash where nobody will look for it. Observed on
+     * a benchmark run — the builder hit a plan it could not satisfy, wrote two
+     * records totalling 180 lines arguing its way to a decision, and the board
+     * reported that the run had produced none.
+     */
+    const adrsWritten = Math.max(0, readAdrs(cwd).length - adrsBefore);
+
     let stashRef: string | undefined;
     if (config.policy.stash_failed_work && !git.isClean(cwd)) {
       this.phase(task.id, attempt, 'stash');
@@ -1380,6 +1398,7 @@ export class Runner {
 
     store.setStatus(task.id, 'blocked', {
       reason,
+      ...(adrsWritten > 0 ? { adrsWritten } : {}),
       ...(stashRef ? { stashRef } : {}),
     });
     // After the stash, never before: `git stash push -u` would sweep the
@@ -1389,12 +1408,23 @@ export class Runner {
       taskId: task.id,
       attempt,
       reason,
+      adrsWritten,
       stashRef,
       artifactsDir: this.lastArtifactsDir,
       evidence: [...new Set(this.lastEvidence)],
     });
     const detail = [
       this.blockedDetail(),
+      // The records are the worker's own account of why it did what it did,
+      // and on a blocked task they are inside the stash rather than the tree.
+      // A report that points at the stash without saying they are in it sends
+      // the reader straight past the reasoning.
+      adrsWritten > 0
+        ? `DECISIONS RECORDED: ${adrsWritten} — the worker's own account of its choices.\n` +
+          (stashRef
+            ? `  In the stash below, under docs/adr/. They are not in your tree.`
+            : `  See docs/adr/.`)
+        : undefined,
       stashRef
         ? [
             `ABANDONED WORK: parked in stash ${stashRef}`,

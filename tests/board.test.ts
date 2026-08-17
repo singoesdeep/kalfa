@@ -70,6 +70,22 @@ describe('renderBoard', () => {
     expect(board).toContain('gate `test` failed');
   });
 
+  // A blocked task's records live inside the stash, so a reader who goes to
+  // docs/adr/ finds nothing and concludes the worker never reasoned about it.
+  // It usually did, at length — that is what a block is made of.
+  it('points at the reasoning a blocked task left behind', () => {
+    const withAdrs: RunRecord = {
+      ...run,
+      tasks: {
+        ...run.tasks,
+        T2: { ...run.tasks['T2']!, adrsWritten: 2 },
+      },
+    };
+    const board = renderBoard(plan, withAdrs);
+    expect(board).toContain('**Decisions recorded:** 2');
+    expect(board).toContain('inside the stash below');
+  });
+
   it('offers the resume command while anything is outstanding', () => {
     expect(renderBoard(plan, run)).toContain('kalfa run --run-id 20260816-031500');
   });

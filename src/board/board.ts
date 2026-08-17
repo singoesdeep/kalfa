@@ -210,6 +210,15 @@ export function renderBoard(plan: Plan, run: RunRecord): string {
       if (record.reason) lines.push(`- **Reason:** ${record.reason}`);
       const failure = lastFailure(record);
       if (failure) lines.push(`- **Last attempt:** ${failure}`);
+      // Named here because a blocked task's records are inside the stash, so
+      // the reader who goes looking in docs/adr/ finds nothing and concludes
+      // the worker never reasoned about it. It usually did — at length.
+      if (record.adrsWritten) {
+        lines.push(
+          `- **Decisions recorded:** ${record.adrsWritten} — its own account of why, ` +
+            `${record.stashRef ? 'inside the stash below' : 'in `docs/adr/`'}`,
+        );
+      }
       if (record.stashRef) {
         lines.push(
           `- **Abandoned work:** parked in stash \`${record.stashRef.slice(0, 8)}\` — ` +
