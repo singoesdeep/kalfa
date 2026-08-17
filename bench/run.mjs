@@ -93,6 +93,38 @@ function kalfa(dir, args, { quiet = true } = {}) {
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
+
+/**
+ * Prove the gate works and fails for the right reason.
+ *
+ * The premise check below asserts what a scenario *means*; this asserts that
+ * it *runs*. Both are needed, and only one of them was there: the fixtures
+ * shipped with `node --test test/`, which does not execute on current Node,
+ * so every builder's real first task was repairing the gate — out of scope,
+ * requiring an edit to the checking apparatus, and duly drawing blocking
+ * findings. The rows looked like data about review behaviour and were data
+ * about a bug in the fixture.
+ *
+ * Seeded, the suite must fail, and it must fail because the implementation is
+ * missing. A gate that passes with no implementation proves nothing; a gate
+ * that fails for any other reason is measuring itself.
+ */
+function probeGate(dir, scenario) {
+  const res = spawnSync('npm', ['test'], { cwd: dir, encoding: 'utf8', shell: true });
+  const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
+  if (res.status === 0) {
+    return { ok: false, detail: 'the suite passes with no implementation — this gate proves nothing' };
+  }
+  const wanted = scenario.missing;
+  if (wanted && !output.includes(wanted.split('/').pop())) {
+    return {
+      ok: false,
+      detail: `fails, but not on the missing ${wanted} — the gate itself may be broken`,
+    };
+  }
+  return { ok: true, detail: `fails on the missing ${wanted ?? 'implementation'}` };
+}
+
 /** The build under test, so a row can be traced to the code that produced it. */
 function kalfaRevision() {
   try {
@@ -172,16 +204,23 @@ for (const scenario of chosen) {
       // MAX_SAFE_INTEGER round-trips fine under the implementation the plan
       // mandates — which would have produced rows about behaviour under
       // pressure with no pressure in them.
+      const gate = probeGate(dir, scenario);
+      if (!gate.ok) failures += 1;
+
       let check = '';
       if (scenario.selfCheck) {
         const result = scenario.selfCheck();
         if (!result.ok) failures += 1;
-        check = ` · premise ${result.ok ? 'holds' : 'BROKEN'}: ${result.detail}`;
+        check = `
+    premise ${result.ok ? 'holds' : 'BROKEN'} · ${result.detail}`;
       }
 
       console.log(
-        `${head} ${validate.status === 0 ? 'plan validates' : 'PLAN INVALID'}${check}
-    ${dir}`,
+        `${head} ${validate.status === 0 ? 'plan validates' : 'PLAN INVALID'}
+` +
+          `    gate ${gate.ok ? 'ok' : 'BROKEN'} · ${gate.detail}${check}
+` +
+          `    ${dir}`,
       );
       continue;
     }
